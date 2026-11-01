@@ -35,6 +35,7 @@ METHODS = {
     "statevector": "Statevector",
     "matrix_product_state": "MatrixProductState",
     "stabilizer": "Stabilizer",
+    "extended_stabilizer": "ExtendedStabilizer",
     "density_matrix": "DensityMatrix",
     "tensor_network": "TensorNetwork",
     "pauli_propagation": "PauliPropagator",

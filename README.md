@@ -6,9 +6,10 @@
 
 Run your Qiskit code on the [Maestro](https://github.com/QoroQuantum/maestro)
 quantum circuit simulator by changing one or two lines. You get Maestro's
-statevector, matrix product state (MPS), stabilizer, density matrix, tensor
-network and Pauli propagation methods, on CPU or GPU, through the Qiskit
-interfaces you already use: a `BackendV2`, a `SamplerV2` and an `EstimatorV2`.
+statevector, matrix product state (MPS), stabilizer, extended stabilizer,
+density matrix, tensor network and Pauli propagation methods, on CPU or GPU,
+through the Qiskit interfaces you already use: a `BackendV2`, a `SamplerV2`
+and an `EstimatorV2`.
 
 ## Install
 
@@ -94,7 +95,7 @@ estimator = MaestroEstimator(
 
 | Option | Values | Default |
 |---|---|---|
-| `method` | `"statevector"`, `"matrix_product_state"` (`"mps"`), `"stabilizer"`, `"density_matrix"`, `"tensor_network"`, `"pauli_propagation"` | `"statevector"` |
+| `method` | `"statevector"`, `"matrix_product_state"` (`"mps"`), `"stabilizer"`, `"extended_stabilizer"`, `"density_matrix"`, `"tensor_network"`, `"pauli_propagation"` | `"statevector"` |
 | `device` | `"CPU"`, `"GPU"` | `"CPU"` |
 | `precision` | `"double"`, `"single"` | `"double"` |
 | `seed_simulator` (`seed` on the primitives) | integer | random |
@@ -193,9 +194,8 @@ Not supported yet:
   outcome, as `StatevectorEstimator` does, and density matrix is exact.
 - **`save_statevector` and other Aer `save_*` instructions.** Use the
   Estimator, or Maestro's own `get_statevector`.
-- **Aer methods without a Maestro equivalent**: `extended_stabilizer`,
-  `unitary`, `superop`. The `automatic` method name isn't accepted; leave
-  `method` out instead.
+- **Aer methods without a Maestro equivalent**: `unitary`, `superop`. The
+  `automatic` method name isn't accepted; leave `method` out instead.
 - **`dt` timing.** Delays are dropped, since they don't change a noiseless
   simulation.
 - **Shot order.** Maestro returns counts. Per-shot `memory` and `BitArray`

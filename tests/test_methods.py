@@ -170,6 +170,38 @@ def test_stabilizer_rejects_non_clifford_gates():
         MaestroEstimator(method="stabilizer").run([(circuit, "X")]).result()
 
 
+# ---- Extended Stabilizer -----------------------------------------------------------------
+
+
+def test_extended_stabilizer_simulates_clifford_plus_t():
+    circuit = QuantumCircuit(2)
+    circuit.h(0)
+    circuit.t(0)
+    circuit.cx(0, 1)
+    circuit.t(1)
+    observable = SparsePauliOp(["ZZ", "XX", "YY"], [1.0, 0.5, 0.5])
+    exact = StatevectorEstimator().run([(circuit, observable)]).result()[0].data.evs
+    est = MaestroEstimator(method="extended_stabilizer").run([(circuit, observable)]).result()[0]
+    np.testing.assert_allclose(est.data.evs, exact, atol=1e-7)
+    assert est.metadata["maestro"]["methods"] == ["extended_stabilizer"]
+
+
+def test_extended_stabilizer_sampling():
+    circuit = QuantumCircuit(2)
+    circuit.h(0)
+    circuit.t(0)
+    circuit.cx(0, 1)
+    circuit.measure_all()
+    counts = (
+        MaestroSampler(method="extended_stabilizer", seed=1)
+        .run([circuit], shots=10_000)
+        .result()[0]
+        .data.meas.get_counts()
+    )
+    sv = MaestroSampler(seed=1).run([circuit], shots=10_000).result()[0].data.meas.get_counts()
+    assert_same_distribution(counts, sv)
+
+
 # ---- The other methods ---------------------------------------------------------------------
 
 
