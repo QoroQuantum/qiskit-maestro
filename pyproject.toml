@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: 2026 Qoro Quantum
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qiskit-maestro"
+version = "0.1.0"
+description = "Qiskit backend, Sampler and Estimator for the Maestro quantum simulator by Qoro Quantum"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Qoro Quantum", email = "team@qoroquantum.de" }]
+keywords = ["qiskit", "quantum", "simulator", "mps", "maestro"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "qiskit>=1.1",
+    "qoro-maestro>=0.3.10",
+    "numpy>=1.23",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "qiskit-aer>=0.14"]
+notebook = ["qiskit-aer>=0.14", "jupyter", "matplotlib"]
+
+[project.urls]
+Homepage = "https://github.com/QoroQuantum/qiskit-maestro"
+Documentation = "https://qoroquantum.github.io/maestro/getting-started/coming-from-qiskit.html"
+Repository = "https://github.com/QoroQuantum/qiskit-maestro"
+Issues = "https://github.com/QoroQuantum/qiskit-maestro/issues"
+
+[tool.setuptools.packages.find]
+include = ["qiskit_maestro*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: needs Maestro's GPU backend; skipped when no GPU is available",
+    "slow: large circuits (100+ qubit MPS, 1,000-qubit stabilizer)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [".venv*", "*.md"]

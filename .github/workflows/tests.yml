@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: 2026 Qoro Quantum
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    - cron: "0 6 * * 1"  # Weekly, to catch new Qiskit and Maestro releases.
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}, Qiskit ${{ matrix.qiskit }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        qiskit: ["1.x", "2.x"]
+        include:
+          - qiskit: "1.x"
+            qiskit-spec: '"qiskit>=1.1,<2"'
+          - qiskit: "2.x"
+            qiskit-spec: '"qiskit>=2.0,<3"'
+          # The oldest supported Qiskit, the floor in pyproject.toml.
+          - python-version: "3.11"
+            qiskit: "1.1"
+            qiskit-spec: '"qiskit==1.1.*" "numpy<2.3"'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Install
+        # Each qiskit-spec is a list of quoted requirements.
+        run: uv pip install --system -e ".[test]" ${{ matrix.qiskit-spec }}
+
+      - name: Show versions
+        run: python -c "import qiskit, qiskit_aer, maestro, importlib.metadata as m; print('qiskit', qiskit.__version__, '| qiskit-aer', qiskit_aer.__version__, '| qoro-maestro', m.version('qoro-maestro'))"
+
+      - name: Test
+        run: pytest -v
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uvx ruff check .
+      - run: uvx ruff format --check .
+      - name: SPDX headers
+        run: |
+          missing=$(grep -L "SPDX-License-Identifier: GPL-3.0-or-later" $(git ls-files '*.py' '*.toml' '*.yml'))
+          if [ -n "$missing" ]; then echo "::error::Missing SPDX header: $missing"; exit 1; fi
