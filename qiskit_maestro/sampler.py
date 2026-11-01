@@ -95,7 +95,12 @@ class MaestroSampler(BaseSamplerV2):
         if circuit.has_measurements:
             seeds = _execution.maestro_seeds(rng, self.seed is not None, num_sets)
             samples = _execution.sample(circuit, angle_rows, pub.shots, self._options, seeds)
-            shots = np.stack([s.shots(rng) for s in samples])
+            # np.stack can't take an empty list, which an empty parameter batch gives.
+            shots = (
+                np.stack([s.shots(rng) for s in samples])
+                if samples
+                else np.zeros((0, pub.shots, circuit.num_clbits), dtype=np.uint8)
+            )
             metadata["maestro"] = run_info([s.info for s in samples])
         else:
             shots = np.zeros((num_sets, pub.shots, circuit.num_clbits), dtype=np.uint8)

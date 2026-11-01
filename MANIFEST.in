@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Qoro Quantum
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# setuptools adds only test_*.py by default; the suite also needs conftest.py and
+# tests/__init__.py, which its relative imports use.
+graft tests
+global-exclude __pycache__ *.py[cod]

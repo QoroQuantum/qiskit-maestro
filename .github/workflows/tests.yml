@@ -49,6 +49,26 @@ jobs:
       - name: Test
         run: pytest -v
 
+  dist:
+    name: Source distribution and wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: |
+          python -m pip install build
+          python -m build
+
+      - name: Verify the sdist and wheel
+        # The sdist must hold the whole test suite and collect it when extracted. The
+        # wheel must install into a fresh environment and import from outside the checkout.
+        run: python scripts/verify_dist.py dist/ --run-tests
+
   lint:
     runs-on: ubuntu-latest
     steps:

@@ -87,6 +87,25 @@ def sample(
     return run_parallel(one, len(angle_rows), workers)
 
 
+def _estimate_options(options: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The options to estimate with, working around a Maestro 0.3.10 stabilizer bug.
+
+    With Maestro's default ``auto_reduce=True``, some Clifford estimates fail with "The
+    stabilizer simulator does not support the Rx gate", for example ``X`` on qubit 0 of a
+    two-qubit circuit and the observable ``ZZ``. In the cases found, the circuit has a
+    qubit that no gate touches, and the Pauli string has Z on that qubit and an operator
+    that anticommutes with X on a qubit with an X gate. The failure is inside
+    Maestro's reduction, which hands the stabilizer simulator an Rx. Every estimate with
+    ``auto_reduce=False`` matched the exact value, so the stabilizer method turns it off
+    unless the user sets it in ``maestro_options``. Drop this once a fixed Maestro is
+    the minimum version.
+    """
+    maestro_options = options["maestro_options"] or {}
+    if options["method"] != "stabilizer" or "auto_reduce" in maestro_options:
+        return options
+    return {**options, "maestro_options": {**maestro_options, "auto_reduce": False}}
+
+
 def estimate(
     circuit: ConvertedCircuit,
     angle_rows: np.ndarray,
@@ -99,6 +118,8 @@ def estimate(
     Returns ``(values, info)`` per row; ``info`` is ``None`` when the row needed
     no simulation.
     """
+
+    options = _estimate_options(options)
 
     def one(i: int) -> tuple[np.ndarray, dict[str, Any] | None]:
         if not labels[i]:

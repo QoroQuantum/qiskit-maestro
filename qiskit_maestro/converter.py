@@ -30,7 +30,7 @@ from qiskit.circuit import (
     QuantumCircuit,
 )
 from qiskit.circuit import library as lib
-from qiskit.circuit.classical import expr
+from qiskit.circuit.classical import expr, types
 
 from .exceptions import UnsupportedInstructionError
 
@@ -368,79 +368,138 @@ class _Converter:
                 "if_else", "Maestro doesn't support nested if_test blocks."
             )
         bits = self._condition(condition, resolve)
-        if false_block is not None and len(bits) > 1:
+        if bits is not None and false_block is not None and len(bits) > 1:
             raise UnsupportedInstructionError(
                 "if_else",
                 "Maestro supports an else branch only when the condition is a single clbit, "
                 "not a register or a combination of bits.",
             )
 
-        def body(items) -> tuple[_Op, ...]:
+        def body(items, *, nested: bool) -> tuple[_Op, ...]:
             ops: list[_Op] = []
             for item, item_qubits, item_clbits in items:
                 if isinstance(item, QuantumCircuit):
-                    self._circuit(item, item_qubits, item_clbits, ops, in_branch=True)
+                    self._circuit(item, item_qubits, item_clbits, ops, in_branch=nested)
                 else:
-                    self._instruction(item, item_qubits, item_clbits, ops, resolve, in_branch=True)
+                    self._instruction(
+                        item, item_qubits, item_clbits, ops, resolve, in_branch=nested
+                    )
             return tuple(ops)
+
+        if bits is None:
+            # The condition can never hold, as for a clbit compared with 2, so only the
+            # else branch runs, and it runs unconditionally.
+            if false_block is not None:
+                out.extend(body([false_block], nested=in_branch))
+            return
 
         self.result.has_control_flow = True
         out.append(
             _Op(
                 "if",
                 condition=bits,
-                true_body=body(true_body),
-                false_body=None if false_block is None else body([false_block]),
+                true_body=body(true_body, nested=True),
+                false_body=None if false_block is None else body([false_block], nested=True),
             )
         )
 
-    def _condition(self, condition, resolve) -> _Condition:
+    def _condition(self, condition, resolve) -> _Condition | None:
+        """The bits that must hold for ``condition`` to be true, or ``None`` if it never is."""
         if isinstance(condition, tuple):
             target, value = condition
-        else:
-            target, value = self._expr_condition(condition)
-        if isinstance(target, Clbit):
-            return ((resolve(target), bool(value)),)
-        if isinstance(target, ClassicalRegister):
-            value = int(value)
-            if not 0 <= value < 2 ** len(target):
-                raise ValueError(f"Condition value {value} doesn't fit register {target.name!r}.")
-            return tuple((resolve(bit), bool(value >> j & 1)) for j, bit in enumerate(target))
-        raise UnsupportedInstructionError("if_else", f"unsupported condition {condition!r}.")
+            if isinstance(target, Clbit):
+                bits = [target]
+            elif isinstance(target, ClassicalRegister):
+                bits = list(target)
+            else:
+                raise UnsupportedInstructionError(
+                    "if_else", f"unsupported condition {condition!r}."
+                )
+            return _equals(bits, int(value), resolve)
+        return self._expr_condition(condition, resolve)
 
-    def _expr_condition(self, condition):
+    def _expr_condition(self, condition, resolve) -> _Condition | None:
         unsupported = UnsupportedInstructionError(
             "if_else",
             "Maestro supports conditions on one clbit or on a register equal to a value, "
             f"not the classical expression {condition}.",
         )
         node = condition
-        while isinstance(node, expr.Cast):
-            node = node.operand
-        if isinstance(node, expr.Var) and isinstance(node.var, Clbit):
-            return node.var, True
-        if (
-            isinstance(node, expr.Unary)
-            and node.op in (expr.Unary.Op.LOGIC_NOT, expr.Unary.Op.BIT_NOT)
-            and isinstance(node.operand, expr.Var)
-            and isinstance(node.operand.var, Clbit)
-        ):
-            return node.operand.var, False
         if isinstance(node, expr.Binary) and node.op == expr.Binary.Op.EQUAL:
             left, right = node.left, node.right
-            while isinstance(left, expr.Cast):
-                left = left.operand
-            while isinstance(right, expr.Cast):
-                right = right.operand
-            if isinstance(right, expr.Var):
+            if _is_constant(left):
                 left, right = right, left
-            if (
-                isinstance(left, expr.Var)
-                and isinstance(left.var, (Clbit, ClassicalRegister))
-                and isinstance(right, expr.Value)
-            ):
-                return left.var, right.value
+            bits = _operand_bits(left, unsupported)
+            return _equals(bits, _constant(right, unsupported), resolve)
+        if isinstance(node, expr.Unary) and node.op in (
+            expr.Unary.Op.LOGIC_NOT,
+            expr.Unary.Op.BIT_NOT,
+        ):
+            bits = _operand_bits(node.operand, unsupported)
+            wanted = False
+        else:
+            bits = _operand_bits(node, unsupported)
+            wanted = True
+        if len(bits) != 1:
+            raise unsupported
+        return ((resolve(bits[0]), wanted),)
+
+
+def _equals(bits: list[Clbit], value: int, resolve) -> _Condition | None:
+    """``bits`` (least significant first) read as an integer equal ``value``.
+
+    A value that doesn't fit in the bits is never equal, so there is no condition.
+    """
+    if not 0 <= value < 2 ** len(bits):
+        return None
+    return tuple((resolve(bit), bool(value >> j & 1)) for j, bit in enumerate(bits))
+
+
+def _operand_bits(node, unsupported: UnsupportedInstructionError) -> list[Clbit]:
+    """The clbits, least significant first, that make up the unsigned integer ``node``.
+
+    A cast to a narrower ``Uint`` keeps the low bits, as Qiskit and Aer evaluate it. A
+    cast to a wider type adds zero high bits, which the list leaves implicit: a value
+    needing them is out of range for :func:`_equals`. A cast of a register to ``Bool``
+    is a non-zero test, which a conjunction of bits can't express.
+    """
+    if isinstance(node, expr.Var):
+        if isinstance(node.var, Clbit):
+            return [node.var]
+        if isinstance(node.var, ClassicalRegister):
+            return list(node.var)
         raise unsupported
+    if isinstance(node, expr.Cast):
+        bits = _operand_bits(node.operand, unsupported)
+        if isinstance(node.type, types.Uint):
+            return bits[: node.type.width]
+        if isinstance(node.type, types.Bool) and len(bits) == 1:
+            return bits
+        raise UnsupportedInstructionError(
+            "if_else",
+            f"Maestro can't evaluate the cast to {node.type} of {len(bits)} bits in the "
+            f"classical expression {node}.",
+        )
+    raise unsupported
+
+
+def _is_constant(node) -> bool:
+    while isinstance(node, expr.Cast):
+        node = node.operand
+    return isinstance(node, expr.Value)
+
+
+def _constant(node, unsupported: UnsupportedInstructionError) -> int:
+    """The integer value of a literal, through any casts around it."""
+    if isinstance(node, expr.Value) and isinstance(node.type, (types.Bool, types.Uint)):
+        return int(node.value)
+    if isinstance(node, expr.Cast):
+        value = _constant(node.operand, unsupported)
+        if isinstance(node.type, types.Uint):
+            return value & (2**node.type.width - 1)
+        if isinstance(node.type, types.Bool):
+            return int(value != 0)
+    raise unsupported
 
 
 def convert(circuit: QuantumCircuit, *, estimator: bool = False) -> ConvertedCircuit:

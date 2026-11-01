@@ -262,3 +262,69 @@ def test_parameter_expressions_in_a_vqe_style_loop():
         mine = estimator.run([(circuit, hamiltonian, [value])]).result()[0].data.evs
         ref = reference.run([(circuit, hamiltonian, [value])]).result()[0].data.evs
         np.testing.assert_allclose(mine, ref, atol=1e-12)
+
+
+# ---- Stabilizer estimates with Maestro's auto_reduce ----------------------------------
+
+
+def _all_paulis(num_qubits: int) -> list[str]:
+    import itertools
+
+    return ["".join(label) for label in itertools.product("IXYZ", repeat=num_qubits)]
+
+
+def test_stabilizer_x_gate_with_an_idle_qubit():
+    # Maestro 0.3.10 raised "The stabilizer simulator does not support the Rx gate" here.
+    circuit = QuantumCircuit(2)
+    circuit.x(0)
+    result = MaestroEstimator(method="stabilizer").run([(circuit, "ZZ")]).result()[0]
+    reference = StatevectorEstimator().run([(circuit, "ZZ")]).result()[0]
+    assert float(result.data.evs) == pytest.approx(-1.0)
+    np.testing.assert_allclose(result.data.evs, reference.data.evs, atol=1e-12)
+
+
+@pytest.mark.parametrize("gate", ["x", "y", "z", "h", "s"])
+def test_stabilizer_matches_statevector_for_every_pauli_with_an_idle_qubit(gate):
+    # Qubit 1 is idle. Every Pauli string on three qubits, including the ones that
+    # failed under Maestro's auto_reduce.
+    circuit = QuantumCircuit(3)
+    getattr(circuit, gate)(0)
+    observables = _all_paulis(3)
+    mine = MaestroEstimator(method="stabilizer").run([(circuit, observables)]).result()[0]
+    reference = StatevectorEstimator().run([(circuit, observables)]).result()[0]
+    np.testing.assert_allclose(mine.data.evs, reference.data.evs, atol=1e-12)
+
+
+def test_stabilizer_workaround_applies_to_from_backend_and_aer_options():
+    circuit = QuantumCircuit(2)
+    circuit.x(0)
+    backend = MaestroBackend(method="stabilizer")
+    for estimator in (
+        MaestroEstimator.from_backend(backend),
+        MaestroEstimator(options={"backend_options": {"method": "stabilizer"}}),
+    ):
+        evs = estimator.run([(circuit, ["ZZ", "ZI", "IZ"])]).result()[0].data.evs
+        np.testing.assert_allclose(evs, [-1, 1, -1], atol=1e-12)
+
+
+def test_auto_reduce_is_only_switched_off_for_stabilizer_estimates():
+    default = MaestroEstimator(method="stabilizer").options
+    assert default["maestro_options"] is None  # The user's options aren't rewritten.
+
+    def reduced(options):
+        return _execution._estimate_options(options)["maestro_options"]
+
+    base = MaestroEstimator(method="stabilizer").options
+    assert reduced(base) == {"auto_reduce": False}
+    # An explicit choice wins, in either direction.
+    for value in (True, False):
+        options = MaestroEstimator(
+            method="stabilizer", maestro_options={"auto_reduce": value, "gate_fusion": True}
+        ).options
+        assert reduced(options) == {"auto_reduce": value, "gate_fusion": True}
+    # Other options are kept, and other methods are untouched.
+    options = MaestroEstimator(method="stabilizer", maestro_options={"gate_fusion": True}).options
+    assert reduced(options) == {"gate_fusion": True, "auto_reduce": False}
+    for method in ("statevector", "matrix_product_state", "density_matrix"):
+        options = MaestroEstimator(method=method).options
+        assert _execution._estimate_options(options) is options

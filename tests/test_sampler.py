@@ -223,3 +223,42 @@ def test_metadata_records_what_ran():
     assert result.metadata == {"version": 2}
     assert result[0].metadata["circuit_metadata"] == {"tag": "bell"}
     assert result[0].metadata["maestro"]["methods"] == ["matrix_product_state"]
+
+
+@pytest.mark.parametrize("shape", [(0,), (0, 3), (2, 0), (2, 0, 3)], ids=str)
+def test_empty_parameter_batches_match_statevector_sampler(shape):
+    theta = Parameter("theta")
+    circuit = QuantumCircuit(2, 2)
+    circuit.rx(theta, 0)
+    circuit.cx(0, 1)
+    circuit.measure([0, 1], [0, 1])
+    pub = (circuit, np.zeros((*shape, 1)))
+
+    mine = MaestroSampler().run([pub], shots=7).result()[0]
+    reference = StatevectorSampler().run([pub], shots=7).result()[0]
+
+    assert mine.data.shape == reference.data.shape == shape
+    assert mine.data.c.array.shape == reference.data.c.array.shape == (*shape, 7, 1)
+    assert mine.data.c.array.dtype == reference.data.c.array.dtype
+    assert mine.data.c.num_bits == reference.data.c.num_bits == 2
+    assert mine.data.c.num_shots == reference.data.c.num_shots == 7
+    assert mine.data.c.get_counts() == reference.data.c.get_counts() == {}
+    assert mine.metadata["shots"] == reference.metadata["shots"] == 7
+
+
+def test_empty_batch_keeps_every_register_and_other_pubs():
+    theta = Parameter("theta")
+    first, second = ClassicalRegister(1, "first"), ClassicalRegister(2, "second")
+    circuit = QuantumCircuit(QuantumRegister(2), first, second)
+    circuit.rx(theta, 0)
+    circuit.measure(0, first[0])
+    circuit.measure([0, 1], second)
+    empty = (circuit, np.zeros((0, 1)))
+    full = (circuit, np.array([np.pi]))
+
+    results = MaestroSampler(seed=2).run([empty, full], shots=5).result()
+    reference = StatevectorSampler().run([empty], shots=5).result()[0]
+
+    assert results[0].data.first.array.shape == reference.data.first.array.shape == (0, 5, 1)
+    assert results[0].data.second.array.shape == reference.data.second.array.shape == (0, 5, 1)
+    assert results[1].data.first.get_counts() == {"1": 5}

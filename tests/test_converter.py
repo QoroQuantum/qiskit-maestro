@@ -10,13 +10,14 @@ import qiskit
 from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
 from qiskit.circuit import Instruction, Parameter
 from qiskit.circuit import library as lib
+from qiskit.circuit.classical import expr, types
 from qiskit.primitives.containers.bindings_array import BindingsArray
 from qiskit.quantum_info import SparsePauliOp, Statevector, random_unitary
 
-from qiskit_maestro import UnsupportedInstructionError
+from qiskit_maestro import MaestroSampler, UnsupportedInstructionError
 from qiskit_maestro.converter import NATIVE_GATES, convert
 
-from .conftest import qft_gate
+from .conftest import qft_gate, requires_aer
 
 QISKIT_1 = qiskit.__version__.startswith("1.")
 
@@ -340,3 +341,194 @@ def test_estimator_circuits_may_reset():
     circuit.reset(0)
     circuit.h(0)
     assert [op.kind for op in convert(circuit, estimator=True).ops] == ["reset", "h"]
+
+
+# ---- Classical conditions: casts and out-of-range values -----------------------------
+
+
+def _register_circuit(value: int, condition) -> QuantumCircuit:
+    """Set a two-bit register to ``value``, run ``if_test(condition(register))``, read a flag.
+
+    The flag is 1 exactly when the condition held, because the qubit starts at 0 and the
+    branch flips it.
+    """
+    qubits = QuantumRegister(1)
+    register = ClassicalRegister(2, "reg")
+    flag = ClassicalRegister(1, "flag")
+    circuit = QuantumCircuit(qubits, register, flag)
+    for bit in range(2):
+        if value >> bit & 1:
+            circuit.x(0)
+            circuit.measure(0, register[bit])
+            circuit.x(0)
+    with circuit.if_test(condition(register)):
+        circuit.x(0)
+    circuit.measure(0, flag[0])
+    return circuit
+
+
+def _maestro_flag(circuit: QuantumCircuit) -> set[str]:
+    data = MaestroSampler(seed=1).run([circuit], shots=50).result()[0].data
+    return set(data.flag.get_counts())
+
+
+def _aer_flag(circuit: QuantumCircuit) -> set[str]:
+    from qiskit_aer import AerSimulator
+
+    counts = AerSimulator(seed_simulator=1).run(circuit, shots=50).result().get_counts()
+    return {key.split()[0] for key in counts}
+
+
+_uint = types.Uint
+
+
+_CONDITIONS = {
+    "narrowed==1": lambda r: expr.equal(expr.cast(r, _uint(1)), 1),
+    "narrowed==0": lambda r: expr.equal(expr.cast(r, _uint(1)), 0),
+    "1==narrowed": lambda r: expr.equal(1, expr.cast(r, _uint(1))),
+    "widened==3": lambda r: expr.equal(expr.cast(r, _uint(3)), 3),
+    "widened==2": lambda r: expr.equal(expr.cast(r, _uint(3)), 2),
+    "uncast==3": lambda r: expr.equal(r, 3),
+}
+
+# Aer 0.18.2 evaluates a cast to Bool upside down (a register holding 3 fails
+# cast(register, Bool)), so these are checked against Qiskit's semantics instead.
+_BOOL_CAST_CONDITIONS = {
+    "narrowed bit": lambda r: expr.cast(expr.cast(r, _uint(1)), types.Bool()),
+    "not narrowed bit": lambda r: expr.logic_not(expr.cast(expr.cast(r, _uint(1)), types.Bool())),
+}
+
+
+@requires_aer
+@pytest.mark.parametrize("value", [0, 1, 2, 3])
+@pytest.mark.parametrize("name", list(_CONDITIONS))
+def test_cast_conditions_match_aer(name, value):
+    circuit = _register_circuit(value, _CONDITIONS[name])
+    assert _maestro_flag(circuit) == _aer_flag(circuit)
+
+
+@pytest.mark.parametrize(
+    "name,value,expected",
+    [
+        # A register holding 3 has low bit 1, and one holding 2 has low bit 0.
+        ("narrowed==1", 3, {"1"}),
+        ("narrowed==1", 2, {"0"}),
+        ("narrowed==0", 2, {"1"}),
+        ("widened==2", 2, {"1"}),
+    ],
+)
+def test_narrowing_cast_keeps_the_low_bits(name, value, expected):
+    # The expected flags come from Qiskit's semantics, so this runs without Aer.
+    assert _maestro_flag(_register_circuit(value, _CONDITIONS[name])) == expected
+
+
+@pytest.mark.parametrize(
+    "name,value,expected",
+    [
+        ("narrowed bit", 3, {"1"}),
+        ("narrowed bit", 2, {"0"}),
+        ("narrowed bit", 1, {"1"}),
+        ("not narrowed bit", 3, {"0"}),
+        ("not narrowed bit", 2, {"1"}),
+    ],
+)
+def test_bool_cast_of_a_narrowed_register(name, value, expected):
+    assert _maestro_flag(_register_circuit(value, _BOOL_CAST_CONDITIONS[name])) == expected
+
+
+def test_narrowing_cast_converts_to_a_test_of_the_low_bits():
+    circuit = _register_circuit(3, _CONDITIONS["narrowed==1"])
+    qasm = convert(circuit).to_qasm(np.zeros(0))
+    assert "if (c[0]) {" in qasm
+    assert "&&" not in qasm
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        lambda r: expr.cast(r, types.Bool()),
+        lambda r: expr.logic_not(r),
+        lambda r: expr.equal(expr.cast(r, types.Bool()), True),
+    ],
+    ids=["register to bool", "logic_not register", "bool(register)==True"],
+)
+def test_casting_a_register_to_bool_is_rejected(condition):
+    # A non-zero test can't be a conjunction of bits. It must not turn into reg == 1.
+    circuit = _register_circuit(3, condition)
+    with pytest.raises(UnsupportedInstructionError, match="if_else"):
+        convert(circuit)
+
+
+@requires_aer
+def test_clbit_compared_with_a_value_above_one_is_never_true():
+    from qiskit_aer import AerSimulator
+
+    circuit = QuantumCircuit(1, 2)
+    circuit.x(0)
+    circuit.measure(0, 0)
+    with circuit.if_test((circuit.clbits[0], 2)):
+        circuit.x(0)  # Would reset the qubit to 0 if the condition held.
+    circuit.measure(0, 1)
+
+    assert not convert(circuit).has_control_flow
+    counts = MaestroSampler(seed=1).run([circuit], shots=50).result()[0].data.c.get_counts()
+    assert counts == {"11": 50}
+    assert AerSimulator(seed_simulator=1).run(circuit, shots=50).result().get_counts() == counts
+
+
+def _clbit_condition_circuit(value: int, measured: int) -> QuantumCircuit:
+    """``if_test((clbit, value))`` with an else branch, then read the qubit."""
+    circuit = QuantumCircuit(1, 2)
+    if measured:
+        circuit.x(0)
+        circuit.measure(0, 0)
+        circuit.x(0)
+    with circuit.if_test((circuit.clbits[0], value)) as else_:
+        circuit.x(0)  # The qubit reads 1 if the condition held.
+    with else_:
+        circuit.z(0)  # A no-op on |0>, so the qubit reads 0 otherwise.
+    circuit.measure(0, 1)
+    return circuit
+
+
+def _clbit_condition_counts(circuit: QuantumCircuit) -> dict[str, int]:
+    return MaestroSampler(seed=1).run([circuit], shots=50).result()[0].data.c.get_counts()
+
+
+@requires_aer
+@pytest.mark.parametrize("value", [0, 1])
+@pytest.mark.parametrize("measured", [0, 1])
+def test_clbit_tuple_conditions_match_aer(value, measured):
+    from qiskit_aer import AerSimulator
+
+    circuit = _clbit_condition_circuit(value, measured)
+    aer = AerSimulator(seed_simulator=1).run(circuit, shots=50).result().get_counts()
+    assert _clbit_condition_counts(circuit) == aer
+
+
+@pytest.mark.parametrize("value", [2, 3])
+@pytest.mark.parametrize("measured", [0, 1])
+def test_clbit_compared_with_a_value_above_one_takes_the_else_branch(value, measured):
+    # No clbit equals 2 or 3, so the else branch must run whatever the clbit holds.
+    # (Aer's result for these depends on the other clbits, so it isn't the reference.)
+    counts = _clbit_condition_counts(_clbit_condition_circuit(value, measured))
+    assert counts == {f"0{measured}": 50}
+
+
+def test_never_true_condition_runs_only_the_else_branch():
+    circuit = QuantumCircuit(2, 2)
+    with circuit.if_test((circuit.clbits[0], 2)) as else_:
+        circuit.x(0)
+    with else_:
+        circuit.x(1)
+    converted = convert(circuit)
+    assert not converted.has_control_flow
+    assert [(op.kind, op.qubits) for op in converted.ops] == [("x", (1,))]
+
+
+@pytest.mark.parametrize("value", [4, 7])
+def test_register_value_that_does_not_fit_is_never_true(value):
+    # Aer treats it the same way: the register can't hold the value, so the test fails.
+    circuit = _register_circuit(3, lambda r: (r, value))
+    assert _maestro_flag(circuit) == {"0"}
+    assert not convert(circuit).has_control_flow

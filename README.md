@@ -183,6 +183,8 @@ Not supported yet:
   noise models, which this package doesn't expose yet.
 - **Some classical control.** `for_loop`, `while_loop`, `switch` and classical
   expressions beyond "bit is set" and "register equals value" aren't supported.
+  Casts are read as Qiskit does: a cast to a narrower `Uint` keeps the low bits.
+  A cast of a multi-bit register to `Bool` (a non-zero test) isn't supported.
   Neither are nested `if_test` blocks, a `reset` inside `if_test`, or an `else`
   branch on a multi-bit condition. Each raises `UnsupportedInstructionError`
   naming the instruction.

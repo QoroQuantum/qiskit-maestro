@@ -16,8 +16,29 @@ First release.
   `density_matrix`, `tensor_network` and `pauli_propagation`, on `CPU` or `GPU`,
   with Aer's option names.
 - Mid-circuit measurement, reset, and `if_test`/`else` classical control.
+  Conditions are evaluated with Qiskit's semantics:
+  - A cast to a narrower `Uint` keeps the low bits, so a two-bit register
+    holding 3 satisfies `cast(register, Uint(1)) == 1`. A cast of a multi-bit
+    register to `Bool`, which tests for non-zero, raises
+    `UnsupportedInstructionError` instead of being read as a different test.
+  - A condition that can never hold, such as a clbit compared with 2 or a
+    register compared with a value its width can't represent, is never true. Its
+    `if` body is dropped and only an `else` branch runs. A clbit compared with 2
+    is no longer read as `clbit == 1`.
 - Time evolution on one persistent simulator, through Maestro's incremental
   evolution: `MaestroEstimator.run_evolution`, and automatic recognition of
   PUBs that repeat one step, such as one circuit per Trotter time point. Switch
   the automatic part off with `incremental_evolution=False`.
+- `MaestroSampler` returns an empty `BitArray` of the same shape as
+  `StatevectorSampler` for an empty parameter batch, such as bindings of shape
+  `(0, 1)`.
+- Stabilizer estimates run with Maestro's `auto_reduce` off. Maestro 0.3.10
+  fails some Clifford estimates with "The stabilizer simulator does not support
+  the Rx gate" when `auto_reduce` is on, for example `X` on qubit 0 of a
+  two-qubit circuit with the observable `ZZ`. Set `auto_reduce` in
+  `maestro_options` to override this. The workaround can go once the minimum
+  `qoro-maestro` has a fix.
+- The source distribution includes the whole test suite, `conftest.py` and
+  `tests/__init__.py` too, so it can be tested after extracting. CI builds
+  both distributions and checks them with `scripts/verify_dist.py`.
 - Supports Qiskit 1.1 and later, including 2.x, on Python 3.10 to 3.13.
