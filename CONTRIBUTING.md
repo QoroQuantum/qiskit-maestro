@@ -1,7 +1,16 @@
 # Contributing to qiskit-maestro
 
-Thanks for helping. Bug reports, fixes, tests and documentation are all welcome.
-Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
+Thanks for helping. Bug reports and feature requests are welcome as
+[issues](https://github.com/QoroQuantum/qiskit-maestro/issues). Everyone taking
+part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## We don't accept pull requests
+
+Qoro Quantum holds the copyright to all the code in this repository, so we don't
+merge code written by anyone outside Qoro Quantum. Pull requests from outside
+contributors are closed without review. If you've found the cause of a bug,
+describe it in words in an issue rather than as a patch, and we'll write the
+fix.
 
 ## Reporting a problem
 
@@ -22,6 +31,9 @@ limitations this package already works around.
 
 ## Development setup
 
+This is how maintainers work on the package, and it's also useful for
+reproducing a problem before you report it.
+
 ```bash
 git clone https://github.com/QoroQuantum/qiskit-maestro
 cd qiskit-maestro
@@ -39,7 +51,7 @@ skipped elsewhere. Tests marked `slow` use 100+ qubit MPS and 1,000-qubit
 stabilizer circuits; they take a few seconds, and `pytest -m "not slow"` skips
 them.
 
-## Making a change
+## Making a change (maintainers)
 
 - Keep all conversion between Maestro's bit order (qubit 0 on the left) and
   Qiskit's (qubit 0 on the right) in `qiskit_maestro/bit_order.py`.
@@ -57,12 +69,12 @@ them.
 - Run `ruff check .` and `ruff format .` before you open a pull request, and
   add a line to [CHANGELOG.md](CHANGELOG.md) under "Unreleased".
 
-By contributing, you agree that your contribution is licensed under the
-GPL-3.0-or-later.
-
 ## Releasing (maintainers)
 
 1. Move the "Unreleased" changelog entries under a new version heading.
 2. Set `version` in `pyproject.toml` to match.
-3. Push a tag `vX.Y.Z`. The publish workflow tests, builds and publishes to PyPI
-   through trusted publishing, then creates the GitHub release.
+3. Publish a GitHub release for the tag `vX.Y.Z`. The publish workflow checks the
+   tag against `pyproject.toml`, runs the tests, builds and verifies the
+   distributions, and uploads them to PyPI through trusted publishing. To
+   publish by hand, or to dry-run the build without uploading, use "Run
+   workflow" on the Publish to PyPI workflow in the Actions tab.

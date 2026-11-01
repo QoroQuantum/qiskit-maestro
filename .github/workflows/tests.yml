@@ -10,6 +10,7 @@ on:
     branches: ["main"]
   schedule:
     - cron: "0 6 * * 1"  # Weekly, to catch new Qiskit and Maestro releases.
+  workflow_call:  # Run by publish.yml before it uploads.
 
 jobs:
   test:
