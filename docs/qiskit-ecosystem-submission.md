@@ -1,20 +1,17 @@
-# Qiskit Ecosystem submission (draft, not submitted)
+# Qiskit Ecosystem submission
 
-Submit by opening a "Submit a project to the Qiskit Ecosystem" issue at
-<https://github.com/Qiskit/ecosystem/issues/new/choose>. The answers below follow
-that form's fields as of November 2026.
+Submitted via [Issue #1449](https://github.com/Qiskit/ecosystem/issues/1449) and tracked in [PR #1450](https://github.com/Qiskit/ecosystem/pull/1450).
 
 ## Before submitting
 
-- [ ] The repository `github.com/QoroQuantum/qiskit-maestro` is public, with
+- [x] The repository `github.com/QoroQuantum/qiskit-maestro` is public, with
       this code on `main`.
-- [ ] `qiskit-maestro` is published on PyPI. Pushing tag `v0.1.0` does this,
-      once a PyPI trusted publisher is set up for the repository's `publish.yml`
-      workflow and `pypi` environment.
-- [ ] The Tests workflow is green on `main` for Python 3.10 to 3.13 with Qiskit
+- [x] `qiskit-maestro` is published on PyPI (v0.1.0 is live at https://pypi.org/project/qiskit-maestro/).
+- [x] The Tests workflow is green on `main` for Python 3.10 to 3.13 with Qiskit
       1.x and 2.x.
-- [ ] The Maestro docs with the updated "Coming from Qiskit Aer" page are live.
-- [ ] Someone at Qoro owns the issue and will answer reviewers' questions.
+- [x] The Maestro docs with the updated "Coming from Qiskit Aer" page are live at
+      https://qoroquantum.github.io/maestro/getting-started/coming-from-qiskit.html.
+- [x] Someone at Qoro owns the issue and will answer reviewers' questions.
 
 ## How the project meets the criteria
 
