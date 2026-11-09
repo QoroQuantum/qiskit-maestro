@@ -231,3 +231,25 @@ def test_single_precision():
     single = MaestroEstimator(precision="single").run([(circuit, observables)]).result()[0]
     exact = StatevectorEstimator().run([(circuit, observables)]).result()[0]
     np.testing.assert_allclose(single.data.evs, exact.data.evs, atol=1e-5)
+
+
+# ---- method="automatic" -------------------------------------------------------------
+
+
+def test_automatic_method_runs_noiseless_circuits_as_statevector():
+    from qiskit import QuantumCircuit
+
+    from qiskit_maestro import MaestroBackend, MaestroEstimator, MaestroSampler
+
+    circuit = QuantumCircuit(2)
+    circuit.h(0)
+    circuit.cx(0, 1)
+    estimator = MaestroEstimator(method="automatic")
+    assert estimator.options["method"] == "automatic"
+    assert estimator.run([(circuit, "ZZ")]).result()[0].data.evs == pytest.approx(1)
+    circuit.measure_all()
+    result = MaestroBackend(method="automatic").run(circuit, shots=100).result()
+    assert result.results[0].metadata["method"] == "statevector"
+    assert set(result.get_counts()) <= {"00", "11"}
+    counts = MaestroSampler(method="automatic").run([circuit]).result()[0].data.meas.get_counts()
+    assert set(counts) <= {"00", "11"}

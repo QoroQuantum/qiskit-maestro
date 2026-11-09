@@ -19,13 +19,16 @@ from typing import Any
 import maestro
 
 from .exceptions import MaestroGpuError
+from .noise import is_aer_noise_model
 
 __all__ = [
+    "AUTOMATIC",
     "DEFAULT_OPTIONS",
     "METHODS",
     "OPTION_NAMES",
     "merge_aer_options",
     "normalize_options",
+    "resolve_method",
     "resolve_options",
     "simulator_config",
 ]
@@ -42,6 +45,9 @@ METHODS = {
 }
 _METHOD_ALIASES = {"mps": "matrix_product_state", "pauli_propagator": "pauli_propagation"}
 
+# Aer's default method. It resolves per circuit: see resolve_method.
+AUTOMATIC = "automatic"
+
 # The methods Maestro's GPU backend implements. The core runs the others on the
 # CPU when asked for the GPU, so they're rejected up front.
 GPU_METHODS = frozenset(
@@ -57,6 +63,7 @@ DEFAULT_OPTIONS: dict[str, Any] = {
     "truncation_threshold": None,
     "max_parallel_experiments": 0,
     "maestro_options": None,
+    "noise_model": None,
 }
 
 _OPTION_ALIASES = {
@@ -133,7 +140,7 @@ def normalize_options(options: Mapping[str, Any]) -> dict[str, Any]:
         if name == "method":
             if isinstance(value, str):
                 value = _METHOD_ALIASES.get(value.lower(), value)
-            value = _choice("method", value, METHODS)
+            value = _choice("method", value, {**METHODS, AUTOMATIC: None})
         elif name == "device":
             if not isinstance(value, str) or value.upper() not in ("CPU", "GPU"):
                 raise ValueError(f"device must be 'CPU' or 'GPU', got {value!r}.")
@@ -151,6 +158,12 @@ def normalize_options(options: Mapping[str, Any]) -> dict[str, Any]:
                 if not isinstance(value, numbers.Real) or value < 0:
                     raise ValueError(f"truncation_threshold must be a number >= 0, got {value!r}.")
                 value = float(value)
+        elif name == "noise_model":
+            if value is not None and not is_aer_noise_model(value):
+                raise ValueError(
+                    "noise_model must be a qiskit_aer.noise.NoiseModel or None, got "
+                    f"{type(value).__name__}."
+                )
         elif name == "maestro_options":
             if value is not None:
                 value = dict(value)
@@ -213,7 +226,7 @@ def validate_combination(options: Mapping[str, Any]) -> None:
     """
     if options["device"] != "GPU":
         return
-    if options["method"] not in GPU_METHODS:
+    if options["method"] not in GPU_METHODS | {AUTOMATIC}:
         raise MaestroGpuError(
             f"method={options['method']!r} doesn't run on Maestro's GPU backend, which "
             f"supports {sorted(GPU_METHODS)}."
@@ -226,6 +239,44 @@ def validate_combination(options: Mapping[str, Any]) -> None:
         )
 
 
+def _concrete(method: str) -> str:
+    """A method Maestro can be configured with: ``"automatic"`` falls back to the default."""
+    return DEFAULT_OPTIONS["method"] if method == AUTOMATIC else method
+
+
+def resolve_method(options: Mapping[str, Any], circuit, shots: int, noisy: bool) -> str:
+    """The method a circuit runs with: ``options["method"]``, or Aer's choice for ``"automatic"``.
+
+    Like Aer, ``"automatic"`` picks the density matrix for a noisy circuit whose
+    measurements all come at the end, when the shots outnumber the ``2**n``
+    amplitudes a statevector would sample one by one. Otherwise it picks the
+    statevector, Maestro's default, which Maestro may still run on a faster
+    engine, such as the stabilizer for a Clifford circuit.
+
+    Args:
+        options: Resolved options.
+        circuit: The :class:`~qiskit_maestro.converter.ConvertedCircuit`.
+        shots: The shots, or for expectation values the trajectories Aer would use.
+        noisy: Whether a noise model with quantum errors applies.
+    """
+    method = options["method"]
+    if method != AUTOMATIC:
+        return method
+    # Aer counts only the qubits the circuit uses, so a circuit transpiled for a
+    # large device still counts as small.
+    width = len(circuit.active_qubits)
+    if (
+        noisy
+        and options["device"] == "CPU"
+        and width < 64
+        and shots > 2**width
+        and circuit.can_sample
+        and not any(save.kind.startswith("save_statevector") for save in circuit.saves)
+    ):
+        return "density_matrix"
+    return DEFAULT_OPTIONS["method"]
+
+
 def simulator_config(
     options: Mapping[str, Any], seed: int | None = None
 ) -> maestro.SimulatorConfig:
@@ -235,7 +286,7 @@ def simulator_config(
         simulator_type=maestro.SimulatorType.Gpu
         if options["device"] == "GPU"
         else maestro.SimulatorType.QCSim,
-        simulation_type=getattr(maestro.SimulationType, METHODS[options["method"]]),
+        simulation_type=getattr(maestro.SimulationType, METHODS[_concrete(options["method"])]),
         precision=options["precision"],
         seed=seed,
         max_bond_dimension=options["max_bond_dimension"],
@@ -276,7 +327,7 @@ def parallel_workers(options: Mapping[str, Any], num_qubits: int, num_tasks: int
     """
     requested = options["max_parallel_experiments"]
     if requested == 0:
-        dense_limit = {"statevector": 20, "density_matrix": 10}.get(options["method"])
+        dense_limit = {"statevector": 20, "density_matrix": 10}.get(_concrete(options["method"]))
         if options["device"] == "GPU" or (dense_limit is not None and num_qubits > dense_limit):
             return 1
         requested = os.cpu_count() or 1

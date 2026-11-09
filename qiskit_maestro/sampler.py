@@ -15,8 +15,15 @@ from qiskit.primitives.primitive_job import PrimitiveJob
 
 from . import _execution
 from .bit_order import pack_register
-from .converter import convert
-from .options import merge_aer_options, resolve_options, run_info, validate_combination
+from .converter import ConvertedCircuit, convert
+from .noise import NoiseTranslator
+from .options import (
+    merge_aer_options,
+    resolve_method,
+    resolve_options,
+    run_info,
+    validate_combination,
+)
 
 __all__ = ["MaestroSampler"]
 
@@ -35,7 +42,8 @@ class MaestroSampler(BaseSamplerV2):
         options: Aer's form, ``{"backend_options": {...}, "run_options": {...}}``,
             for code moving from ``qiskit_aer.primitives.SamplerV2``.
         **simulator_options: Any :class:`~qiskit_maestro.MaestroBackend` option,
-            such as ``method="matrix_product_state"`` or ``device="GPU"``.
+            such as ``method="matrix_product_state"``, ``device="GPU"`` or
+            ``noise_model``.
     """
 
     def __init__(
@@ -76,25 +84,40 @@ class MaestroSampler(BaseSamplerV2):
         if shots is None:
             shots = self._default_shots
         coerced = [SamplerPub.coerce(pub, shots) for pub in pubs]
-        # Convert up front, so an unsupported instruction raises here.
-        converted = [convert(pub.circuit) for pub in coerced]
+        # Convert up front, so an unsupported instruction or noise raises here.
+        model = self._options["noise_model"]
+        translator = None if model is None else NoiseTranslator(model)
+        prepared = [self._prepare(pub, translator) for pub in coerced]
         validate_combination(self._options)
-        job = PrimitiveJob(self._run, coerced, converted)
+        job = PrimitiveJob(self._run, coerced, prepared)
         job._submit()
         return job
 
-    def _run(self, pubs: list[SamplerPub], converted) -> PrimitiveResult[SamplerPubResult]:
+    def _prepare(
+        self, pub: SamplerPub, translator: NoiseTranslator | None
+    ) -> tuple[ConvertedCircuit, dict[str, Any]]:
+        circuit = convert(pub.circuit, noise=translator)
+        noisy = translator is not None and translator.has_quantum_errors
+        method = resolve_method(self._options, circuit, pub.shots, noisy)
+        return circuit.with_noise(translator, method), {**self._options, "method": method}
+
+    def _run(self, pubs: list[SamplerPub], prepared) -> PrimitiveResult[SamplerPubResult]:
         rng = np.random.default_rng(self.seed)
-        results = [self._run_pub(pub, circuit, rng) for pub, circuit in zip(pubs, converted)]
+        results = [
+            self._run_pub(pub, circuit, options, rng)
+            for pub, (circuit, options) in zip(pubs, prepared)
+        ]
         return PrimitiveResult(results, metadata={"version": 2})
 
-    def _run_pub(self, pub: SamplerPub, circuit, rng: np.random.Generator) -> SamplerPubResult:
+    def _run_pub(
+        self, pub: SamplerPub, circuit, options: dict[str, Any], rng: np.random.Generator
+    ) -> SamplerPubResult:
         angle_rows = circuit.angle_rows(pub.parameter_values)
         num_sets = len(angle_rows)
         metadata: dict[str, Any] = {"shots": pub.shots, "circuit_metadata": pub.circuit.metadata}
         if circuit.has_measurements:
             seeds = _execution.maestro_seeds(rng, self.seed is not None, num_sets)
-            samples = _execution.sample(circuit, angle_rows, pub.shots, self._options, seeds)
+            samples = _execution.sample(circuit, angle_rows, pub.shots, options, seeds)
             # np.stack can't take an empty list, which an empty parameter batch gives.
             shots = (
                 np.stack([s.shots(rng) for s in samples])

@@ -5,3 +5,5 @@
 # tests/__init__.py, which its relative imports use.
 graft tests
 global-exclude __pycache__ *.py[cod]
+# tests/test_examples.py runs the example scripts.
+include examples/*.py

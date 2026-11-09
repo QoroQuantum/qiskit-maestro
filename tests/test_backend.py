@@ -28,7 +28,8 @@ def test_target_lists_native_operations_without_a_coupling_map():
     backend = MaestroBackend()
     names = set(backend.target.operation_names)
     assert {"measure", "reset", "delay", "if_else", "cx", "u", "rz", "ccx", "cswap"} <= names
-    assert len(names) == len(NATIVE_GATES) + 4
+    assert {"for_loop", "switch_case"} <= names
+    assert len(names) == len(NATIVE_GATES) + 6
     assert backend.coupling_map is None
     assert backend.max_circuits is None
 
@@ -75,7 +76,7 @@ def test_aer_option_names_are_accepted():
 @pytest.mark.parametrize(
     "options,match",
     [
-        ({"method": "automatic"}, "method must be one of"),
+        ({"method": "unitary"}, "method must be one of"),
         ({"device": "TPU"}, "device must be"),
         ({"precision": "half"}, "precision must be"),
         ({"max_bond_dimension": 0}, "max_bond_dimension"),
@@ -207,9 +208,9 @@ def test_unbound_parameters_raise():
 
 def test_unsupported_instruction_raises_at_run():
     circuit = QuantumCircuit(1, 1)
-    with circuit.for_loop(range(2)):
-        circuit.x(0)
-    with pytest.raises(UnsupportedInstructionError, match="for_loop"):
+    with circuit.while_loop((circuit.clbits[0], 0)):
+        circuit.measure(0, 0)
+    with pytest.raises(UnsupportedInstructionError, match="while_loop"):
         MaestroBackend().run(circuit)
 
 

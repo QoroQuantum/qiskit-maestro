@@ -124,21 +124,29 @@ today; none of these are hidden from users.
      reset operation");
    - no `else` on a condition over more than one bit;
    - no nested `if`, and no `while`, `for` or `switch`;
-   - only `==` and bit tests, no classical expressions.
+   - only `==` and bit tests, no classical expressions;
+   - no noise channels, so a circuit with both quantum noise and classical
+     control can't run (readout errors work, through the `NoiseModel`).
 
-   The plugin rejects each case with an error naming it. Ask: conditional
-   gate/measure/reset methods on `QuantumCircuit`.
+   The plugin unrolls `for` loops and rewrites `switch` as one `if` per case
+   value, and rejects the other cases with an error naming them. Ask:
+   conditional gate/measure/reset methods on `QuantumCircuit`.
 7. **Missing gate methods.** There's no `unitary` (the low-level `Simulator`
    has `ApplyGenericOneQubitGate` and the 2- and 3-qubit versions, but
-   `QuantumCircuit` doesn't). `rzz` and `rxx` exist only in the QASM parser, and
+   `QuantumCircuit` doesn't, and the plugin runs everything through
+   `QuantumCircuit.execute`/`estimate`, so `UnitaryGate` is still expanded
+   through its Qiskit definition; still true in 0.3.13). Ask: a
+   `QuantumCircuit.unitary(qubits, matrix)` for one to three qubits. `rzz`
+   and `rxx` exist only in the QASM parser, and
    `ryy`, `rzx`, `ecr`, `iswap` and `xx_plus_yy` aren't available at all.
    Workaround: those gates are decomposed through their Qiskit definitions, so
    `rzz` becomes `cx, rz, cx`. That's correct, but it doubles the two-qubit gates
    an MPS has to apply.
 8. **Width is inferred.** There's no way to declare 10 qubits, and
    `get_statevector` drops untouched qubits. Counts and estimates aren't
-   affected (checked with idle qubits in the middle). The plugin never asks for a
-   statevector and pads bitstrings to the circuit's clbit count.
+   affected (checked with idle qubits in the middle). The plugin pads saved
+   statevectors with the untouched high qubits, and bitstrings to the circuit's
+   clbit count.
 9. **No standard deviations.** `estimate` has no variance, and
    `expectation_error_bounds` is non-zero only when `observable_error_tolerance`
    is set. With `precision > 0` the plugin adds Gaussian noise as
@@ -153,7 +161,42 @@ today; none of these are hidden from users.
     resets as `estimate` does. Smaller points: it takes Pauli strings only (no
     coefficients), returns steps sorted, and reports the configured
     `simulator` and `method` enums where `execute` and `estimate` report ints.
-11. **Small API frictions.** `estimate` accepts only a `list` of strings, not a
+11. **`NoiseModel` noise is per qubit, not per instruction.** It acts after
+    every gate on a qubit (with separate one- and two-qubit layers), whatever
+    the gate. Aer attaches errors per instruction name and qubits, so IBM
+    device models leave `rz` noiseless and put one error on each `ecr`, which
+    the plugin expands into several Maestro gates. In Python only `h`, `s` and
+    `sdg` take `noiseless=True`, and circuits have no Kraus or
+    thermal-relaxation instruction, only `pauli_channel` (one or two qubits).
+    The C++ circuit has both (`SetNoiseless` on every operation,
+    `QuantumChannelOperation` with Kraus operators), and the native request
+    API exposes them (`"noiseless"` on gates, `"kraus"` instructions), but the
+    Python bindings don't. Workaround: the plugin doesn't map Aer errors onto
+    `NoiseModel` setters. It writes each error as a Pauli channel plus
+    amplitude damping and places them where Aer applies the error: a
+    `pauli_channel`, and on density matrix a `delay` under `set_idle_noise`
+    (T1 = 1, T2 = 2, the excited population), which Maestro applies as an
+    exact thermal channel. On pure-state methods the damping runs on an
+    ancilla (`cry`, `cx`, `reset`), because the sampled thermal noise
+    approximates T2 > T1 by T2 = T1 (with a `RuntimeWarning`). Coherent errors
+    and general Kraus channels raise. Ask: `noiseless=` on every gate method,
+    and `kraus_channel(qubits, operators)` on `QuantumCircuit`.
+12. **Noisy expectation values simulate every qubit.** With a channel in the
+    circuit, `noisy_estimate_montecarlo` skips the causal-cone reduction, so a
+    3-qubit circuit transpiled for a 127-qubit device didn't finish in
+    5 minutes (sampling it with `noisy_execute` takes milliseconds).
+    Workaround: noisy circuits drop the qubits no operation touches, as Aer's
+    truncation does, and observables are remapped (X or Y on a dropped qubit
+    gives 0). Ask: drop untouched qubits before simulating.
+13. **`noisy_execute` runs realizations one after another.** With one
+    realization per shot, as sampled noise needs, 20,000 shots of a small
+    circuit took 1.9 s. Workaround: the plugin splits the shots into tasks
+    of 1,024 with derived seeds and runs them on threads (0.8 s on 12 cores).
+    Ask: run realizations in parallel inside `noisy_execute`.
+14. **`get_statevector` needs a statevector or MPS.** The stabilizer and
+    tensor-network methods raise ("Invalid simulation type for obtaining the
+    amplitude"). The plugin rejects `save_statevector` on them.
+15. **Small API frictions.** `estimate` accepts only a `list` of strings, not a
     tuple or other sequence. `delay` takes seconds, but Qiskit delays are often
     in `dt`, which a simulator target doesn't define. The plugin drops delays,
     which is exact without noise.

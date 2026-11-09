@@ -12,7 +12,12 @@ from importlib.metadata import PackageNotFoundError, version
 
 from .backend import MaestroBackend, MaestroJob
 from .estimator import MaestroEstimator
-from .exceptions import MaestroError, MaestroGpuError, UnsupportedInstructionError
+from .exceptions import (
+    MaestroError,
+    MaestroGpuError,
+    UnsupportedInstructionError,
+    UnsupportedNoiseError,
+)
 from .sampler import MaestroSampler
 
 try:
@@ -28,5 +33,6 @@ __all__ = [
     "MaestroJob",
     "MaestroSampler",
     "UnsupportedInstructionError",
+    "UnsupportedNoiseError",
     "__version__",
 ]

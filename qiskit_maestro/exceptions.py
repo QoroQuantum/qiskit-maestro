@@ -22,6 +22,18 @@ class UnsupportedInstructionError(MaestroError):
         super().__init__(f"Maestro can't run '{instruction}': {reason}")
 
 
+class UnsupportedNoiseError(UnsupportedInstructionError):
+    """A noise model holds an error Maestro can't reproduce exactly.
+
+    ``instruction`` names the instruction the error is attached to, and
+    ``qubits`` its qubits when the error is on particular ones.
+    """
+
+    def __init__(self, instruction: str, reason: str, qubits: tuple[int, ...] | None = None):
+        self.qubits = qubits
+        super().__init__(instruction, reason)
+
+
 class MaestroGpuError(MaestroError):
     """``device="GPU"`` was requested but Maestro's GPU backend can't be used."""
 

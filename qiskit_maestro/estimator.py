@@ -17,8 +17,17 @@ from qiskit.primitives.primitive_job import PrimitiveJob
 from . import _execution, evolution
 from .bit_order import pauli_label_to_maestro
 from .converter import ConvertedCircuit, convert
-from .exceptions import UnsupportedInstructionError
-from .options import merge_aer_options, resolve_options, run_info, validate_combination
+from .exceptions import UnsupportedInstructionError, UnsupportedNoiseError
+from .noise import NoiseTranslator
+from .options import (
+    AUTOMATIC,
+    DEFAULT_OPTIONS,
+    merge_aer_options,
+    resolve_method,
+    resolve_options,
+    run_info,
+    validate_combination,
+)
 
 __all__ = ["MaestroEstimator"]
 
@@ -123,7 +132,11 @@ class MaestroEstimator(BaseEstimatorV2):
             (default ``True``). Set ``False`` to simulate every circuit from
             the start.
         **simulator_options: Any :class:`~qiskit_maestro.MaestroBackend` option,
-            such as ``method="matrix_product_state"`` or ``device="GPU"``.
+            such as ``method="matrix_product_state"``, ``device="GPU"`` or
+            ``noise_model``. With a noise model, ``method="density_matrix"``
+            gives exact noisy values; pure-state methods average
+            1,024 noise trajectories, as Aer's ``EstimatorV2`` does on its
+            statevector method.
     """
 
     def __init__(
@@ -170,10 +183,18 @@ class MaestroEstimator(BaseEstimatorV2):
         if precision is None:
             precision = self._default_precision
         coerced = [EstimatorPub.coerce(pub, precision) for pub in pubs]
-        # Convert up front, so an unsupported instruction raises here.
-        converted = [convert(pub.circuit, estimator=True) for pub in coerced]
+        # Convert up front, so an unsupported instruction or noise raises here.
+        model = self._options["noise_model"]
+        translator = None if model is None else NoiseTranslator(model)
+        noisy = translator is not None and translator.has_quantum_errors
+        converted, options = [], []
+        for pub in coerced:
+            circuit = convert(pub.circuit, estimator=True, noise=translator)
+            method = resolve_method(self._options, circuit, _execution.NOISE_TRAJECTORIES, noisy)
+            converted.append(circuit.with_noise(translator, method))
+            options.append({**self._options, "method": method})
         validate_combination(self._options)
-        job = PrimitiveJob(self._run, coerced, converted)
+        job = PrimitiveJob(self._run, coerced, converted, options)
         job._submit()
         return job
 
@@ -229,8 +250,16 @@ class MaestroEstimator(BaseEstimatorV2):
         # A PUB on the initial state checks the observables and precision.
         pub = EstimatorPub.coerce((initial_state, observables), precision)
         circuits = {}
+        model = self._options["noise_model"]
+        translator = None if model is None else NoiseTranslator(model)
         for name, circuit in (("initial_state", initial_state), ("step", step)):
-            circuits[name] = convert(circuit, estimator=True)
+            circuits[name] = convert(circuit, estimator=True, noise=translator)
+            if circuits[name].has_noise:
+                raise UnsupportedNoiseError(
+                    "noise_model",
+                    "run_evolution doesn't apply noise models. Use run() with one circuit "
+                    "per time point instead.",
+                )
             if circuits[name].parameters:
                 names = ", ".join(sorted(p.name for p in circuits[name].parameters))
                 raise ValueError(f"{name} has unbound parameters: {names}. Assign them first.")
@@ -263,7 +292,9 @@ class MaestroEstimator(BaseEstimatorV2):
         for index in np.ndindex(observable_of.shape):
             observable = _parse(observable_of[index], parsed)
             plan.append((index, observable, observable.columns(needed)))
-        values, info = evolution.evolve(initial.ops, step.ops, list(needed), steps, self._options)
+        values, info = evolution.evolve(
+            initial.ops, step.ops, list(needed), steps, self._noiseless_options()
+        )
 
         evs = np.empty((len(steps), *observable_of.shape), dtype=float)
         for t in range(len(steps)):
@@ -275,10 +306,16 @@ class MaestroEstimator(BaseEstimatorV2):
             metadata={"version": 2},
         )
 
-    def _run(self, pubs: list[EstimatorPub], converted) -> PrimitiveResult[PubResult]:
+    def _noiseless_options(self) -> dict[str, Any]:
+        """Options for a noiseless run, with ``"automatic"`` resolved to Maestro's default."""
+        if self._options["method"] != AUTOMATIC:
+            return self._options
+        return {**self._options, "method": DEFAULT_OPTIONS["method"]}
+
+    def _run(self, pubs: list[EstimatorPub], converted, options) -> PrimitiveResult[PubResult]:
         evolved = self._run_chain(pubs, converted)
         results = [
-            evolved[i] if i in evolved else self._run_pub(pub, circuit)
+            evolved[i] if i in evolved else self._run_pub(pub, circuit, options[i])
             for i, (pub, circuit) in enumerate(zip(pubs, converted))
         ]
         return PrimitiveResult(results, metadata={"version": 2})
@@ -288,17 +325,19 @@ class MaestroEstimator(BaseEstimatorV2):
 
         Returns results by PUB index; PUBs left out run one by one.
         """
-        method = self._options["method"]
+        options = self._noiseless_options()
+        method = options["method"]
         if not self._incremental_evolution or method not in _EVOLUTION_LIMITS:
             return {}
-        # Only PUBs with one parameter set, no parameters and no resets, which
-        # Maestro's incremental evolution doesn't apply correctly yet.
+        # Only PUBs without a noise model, with one parameter set, no parameters and no
+        # resets, which Maestro's incremental evolution doesn't apply correctly yet.
         members = [
             i
             for i, (pub, circuit) in enumerate(zip(pubs, converted))
             if pub.parameter_values.shape == ()
             and not circuit.parameters
             and not any(op.kind == "reset" for op in circuit.ops)
+            and circuit.noise is None
         ]
         widths = {converted[i].num_qubits for i in members}
         limit = _EVOLUTION_LIMITS[method]
@@ -321,7 +360,7 @@ class MaestroEstimator(BaseEstimatorV2):
                 ]
             )
         values, info = evolution.evolve(
-            chain.initial, chain.step, list(needed), chain.steps, self._options
+            chain.initial, chain.step, list(needed), chain.steps, options
         )
 
         results = {}
@@ -339,7 +378,9 @@ class MaestroEstimator(BaseEstimatorV2):
             results[i] = self._result(pub.precision, evs, metadata, [row_info], evolved=True)
         return results
 
-    def _run_pub(self, pub: EstimatorPub, circuit: ConvertedCircuit) -> PubResult:
+    def _run_pub(
+        self, pub: EstimatorPub, circuit: ConvertedCircuit, options: dict[str, Any]
+    ) -> PubResult:
         angle_rows = circuit.angle_rows(pub.parameter_values)
         shape = pub.shape
         set_of = np.broadcast_to(
@@ -361,8 +402,9 @@ class MaestroEstimator(BaseEstimatorV2):
         # for draw.
         seed_rng = np.random.default_rng(None if self.seed is None else [self.seed, 1])
         seeds = _execution.maestro_seeds(seed_rng, self.seed is not None, len(angle_rows))
+        # With sampled noise, values average _execution.NOISE_TRAJECTORIES trajectories.
         estimates = _execution.estimate(
-            circuit, angle_rows, [list(needed) for needed in labels], self._options, seeds
+            circuit, angle_rows, [list(needed) for needed in labels], options, seeds
         )
 
         evs = np.empty(shape, dtype=float)

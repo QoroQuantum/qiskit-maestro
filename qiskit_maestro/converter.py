@@ -9,18 +9,27 @@ expressions and replays the list onto a fresh :class:`maestro.circuits.QuantumCi
 so a PUB with many parameter sets pays for the conversion once.
 
 Gates outside Maestro's native set are expanded through their Qiskit
-definitions. Circuits with ``if_test`` are written out as OpenQASM 3 instead,
+definitions. ``for_loop`` is unrolled and ``switch`` becomes a chain of ``if``
+blocks. Circuits with classical control are written out as OpenQASM 3,
 because Maestro accepts classical control only through its QASM parser.
+
+With an Aer noise model, each instruction's errors become placeholder ``noise``
+operations where Aer applies them. :meth:`ConvertedCircuit.with_noise` replaces
+them with Maestro operations once the simulation method is known.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import math
+import numbers
 from dataclasses import dataclass, field
 
 import maestro
 import numpy as np
 from maestro.circuits import QuantumCircuit as MaestroCircuit
 from qiskit.circuit import (
+    CASE_DEFAULT,
     ClassicalRegister,
     Clbit,
     ControlFlowOp,
@@ -32,9 +41,10 @@ from qiskit.circuit import (
 from qiskit.circuit import library as lib
 from qiskit.circuit.classical import expr, types
 
-from .exceptions import UnsupportedInstructionError
+from .exceptions import UnsupportedInstructionError, UnsupportedNoiseError
+from .noise import maestro_noise_model
 
-__all__ = ["NATIVE_GATES", "ConvertedCircuit", "convert"]
+__all__ = ["NATIVE_GATES", "SAVE_INSTRUCTIONS", "ConvertedCircuit", "NoiseSpec", "convert"]
 
 # Qiskit gate class -> the maestro.circuits.QuantumCircuit method that applies it.
 # Every pair was checked against Qiskit's matrix, global phase included. The
@@ -72,17 +82,32 @@ NATIVE_GATES = {
 
 # Instructions that don't change the state of a noiseless simulation. Delays
 # are dropped rather than passed on because Maestro takes them in seconds and a
-# simulator has no `dt` to convert Qiskit's default unit.
+# simulator has no `dt` to convert Qiskit's default unit. A noise model can
+# still attach errors to them.
 _IDENTITIES = frozenset({"barrier", "delay", "id", "global_phase"})
 
+# Aer's save instructions that MaestroBackend.run returns data for, as Aer does.
+SAVE_INSTRUCTIONS = frozenset(
+    {
+        "save_statevector",
+        "save_statevector_dict",
+        "save_probabilities",
+        "save_probabilities_dict",
+        "save_expval",
+        "save_expval_var",
+    }
+)
+
 _UNSUPPORTED_REASONS = {
-    "for_loop": "loops aren't supported; Maestro runs classical control only as if/else.",
-    "while_loop": "loops aren't supported; Maestro runs classical control only as if/else.",
-    "switch_case": "switch statements aren't supported; use if_test.",
-    "break_loop": "loops aren't supported.",
-    "continue_loop": "loops aren't supported.",
+    "while_loop": "while loops aren't supported; Maestro runs classical control only as if/else.",
+    "break_loop": "a loop with break can't be unrolled; only for loops without break or continue are.",
+    "continue_loop": "a loop with continue can't be unrolled; only for loops without break or "
+    "continue are.",
     "store": "classical variables aren't supported.",
 }
+
+# Most if blocks a switch's default case may become.
+_MAX_DEFAULT_BRANCHES = 64
 
 
 @dataclass(frozen=True)
@@ -98,13 +123,53 @@ _Condition = tuple[tuple[int, bool], ...]
 
 @dataclass(frozen=True)
 class _Op:
-    kind: str  # A NATIVE_GATES method name, "measure", "reset" or "if".
+    # A NATIVE_GATES method name, "measure", "reset", "if", "noise" (an Aer error to
+    # translate), "pauli_channel" or "delay" (a Maestro idle-noise delay).
+    kind: str
     qubits: tuple[int, ...] = ()
     angles: tuple[_Angle, ...] = ()
     clbits: tuple[int, ...] = ()
     condition: _Condition = ()
     true_body: tuple[_Op, ...] = ()
     false_body: tuple[_Op, ...] | None = None
+    probabilities: tuple[float, ...] = ()
+    noise: int = -1
+
+
+@dataclass(frozen=True)
+class Save:
+    """An Aer save instruction: what to save, and where in the circuit."""
+
+    kind: str
+    label: str
+    qubits: tuple[int, ...]
+    # save_expval terms: (Pauli label on ``qubits``, coefficient, coefficient in the square).
+    terms: tuple[tuple[str, float, float], ...]
+    position: int  # Number of top-level ops before it.
+    phases: int  # Number of global-phase terms before it.
+    after_reset: bool = False
+    after_noise: bool = False
+
+
+@dataclass(frozen=True)
+class NoiseSpec:
+    """How a circuit with translated noise runs.
+
+    ``stochastic`` circuits hold operations a pure-state simulation samples, so
+    they run one noise realization per shot. ``idle`` maps each qubit with
+    damping ``delay`` operations to its excited-state population.
+    """
+
+    family: str
+    stochastic: bool
+    active: bool = False  # Whether the circuit holds any noise operation.
+    idle: tuple[tuple[int, float], ...] = ()
+    readout: tuple[tuple[int, float, float], ...] = ()
+
+    def maestro_model(self, *, readout: bool = True) -> maestro.NoiseModel:
+        return maestro_noise_model(
+            dict(self.idle), {q: (a, b) for q, a, b in self.readout} if readout else {}
+        )
 
 
 @dataclass
@@ -118,6 +183,45 @@ class ConvertedCircuit:
     expressions: list[ParameterExpression] = field(default_factory=list)
     has_measurements: bool = False
     has_control_flow: bool = False
+    saves: list[Save] = field(default_factory=list)
+    # Global-phase terms of the top-level circuit and the definitions expanded in
+    # it, kept only for circuits that save their statevector.
+    phases: list[_Angle] = field(default_factory=list)
+    noise: NoiseSpec | None = None
+    # The qubit pure-state noise uses as an ancilla, or None.
+    ancilla: int | None = None
+    # After with_noise drops idle qubits: the original index of each qubit left.
+    qubit_map: tuple[int, ...] | None = None
+
+    @property
+    def active_qubits(self) -> list[int]:
+        """The qubits an operation or a save acts on, as Aer counts them for truncation."""
+        if any(save.kind.startswith("save_statevector") for save in self.saves):
+            return list(range(self.num_qubits))
+        used = {q for op in _walk(self.ops) for q in op.qubits}
+        used.update(q for save in self.saves for q in save.qubits)
+        return sorted(used)
+
+    @property
+    def has_noise(self) -> bool:
+        """Whether the circuit holds Aer errors not yet translated by :meth:`with_noise`."""
+        return any(op.kind == "noise" for op in _walk(self.ops))
+
+    @property
+    def can_sample(self) -> bool:
+        """Whether every measurement comes at the end, as Aer's automatic method requires.
+
+        Then a density-matrix simulation can sample all shots from one run.
+        """
+        measured = False
+        for op in self.ops:
+            if op.kind == "if":
+                return False
+            if op.kind == "measure":
+                measured = True
+            elif measured and op.kind != "noise":
+                return False
+        return True
 
     def angle_rows(self, parameter_values=None) -> np.ndarray:
         """Evaluate every symbolic angle for each parameter set.
@@ -152,6 +256,12 @@ class ConvertedCircuit:
                 rows[i, j] = _real(bound, expression)
         return rows
 
+    def phase(self, angles: np.ndarray, count: int) -> float:
+        """The global phase of the first ``count`` phase terms, for one row of angles."""
+        return sum(
+            float(angles[a.index]) if isinstance(a, _Slot) else a for a in self.phases[:count]
+        )
+
     def to_maestro(self, angles: np.ndarray) -> MaestroCircuit:
         """Build the Maestro circuit for one row of :meth:`angle_rows`."""
         if self.has_control_flow:
@@ -178,6 +288,149 @@ class ConvertedCircuit:
         except ValueError:
             raise UnsupportedInstructionError("if_else", parser.get_error_message()) from None
 
+    def build(self, angles: np.ndarray) -> MaestroCircuit:
+        """The Maestro circuit for one row of angles, through QASM if it has classical control."""
+        return self.to_maestro_qasm(angles) if self.has_control_flow else self.to_maestro(angles)
+
+    def with_noise(self, translator, method: str) -> ConvertedCircuit:
+        """Translate the circuit's Aer errors for ``method`` and attach the readout errors.
+
+        Returns a copy whose ``noise`` says how to run it. A circuit converted
+        without a noise model is returned unchanged.
+
+        Raises:
+            UnsupportedNoiseError: for an error Maestro can't reproduce exactly
+                with this method, or noise on a circuit with classical control.
+        """
+        if translator is None:
+            return self
+        family = "exact" if method == "density_matrix" else "sampled"
+        ancilla = self.num_qubits
+        idle: dict[int, float] = {}
+        stochastic = False
+
+        def realize(op: _Op) -> list[_Op]:
+            nonlocal stochastic
+            if op.kind != "noise":
+                return [op]
+            name, qubits = translator.describe(op.noise)
+            channel = translator.channel(op.noise, family)
+            out = []
+            if channel.paulis is not None:
+                out.append(_Op("pauli_channel", op.qubits, probabilities=channel.paulis))
+                stochastic = stochastic or family == "sampled"
+            for k, a in channel.decays:
+                qubit = op.qubits[k]
+                if family == "exact":
+                    idle[qubit] = translator.excited_population(qubit)
+                    out.append(_Op("delay", (qubit,), angles=(-math.log(a),)))
+                    continue
+                if method == "stabilizer":
+                    raise UnsupportedNoiseError(
+                        name,
+                        f"its noise on qubits {list(qubits)} includes relaxation, which the "
+                        "stabilizer method can't apply. Use method='statevector' or "
+                        "'density_matrix'.",
+                        qubits,
+                    )
+                # Amplitude damping, exactly: rotate the excited population into a fresh
+                # ancilla, return the decayed part to |0>, and discard the ancilla.
+                stochastic = True
+                theta = 2 * math.asin(math.sqrt(1 - a))
+                out.extend(
+                    [
+                        _Op("cry", (qubit, ancilla), (theta,)),
+                        _Op("cx", (ancilla, qubit)),
+                        _Op("reset", (ancilla,)),
+                    ]
+                )
+            return out
+
+        if self.has_noise and self.has_control_flow:
+            raise UnsupportedNoiseError(
+                "if_else",
+                "noise on circuits with classical control isn't supported: Maestro runs "
+                "classical control only through OpenQASM, which can't hold noise channels. "
+                "Readout errors alone are supported.",
+            )
+        positions = []
+        ops: list[_Op] = []
+        for op in self.ops:
+            positions.append(len(ops))
+            ops.extend(realize(op))
+        positions.append(len(ops))
+        noisy_before = np.cumsum([0] + [op.kind == "noise" for op in self.ops])
+        saves = [
+            dataclasses.replace(
+                save,
+                position=positions[save.position],
+                after_noise=bool(noisy_before[save.position]),
+            )
+            for save in self.saves
+        ]
+        readout = []
+        if self.has_measurements:
+            translator.check_readout()
+            for qubit in range(self.num_qubits):
+                rates = translator.readout(qubit)
+                if rates is not None:
+                    readout.append((qubit, *rates))
+        uses_ancilla = any(ancilla in op.qubits for op in ops)
+        noise = NoiseSpec(
+            family=family,
+            stochastic=stochastic,
+            active=uses_ancilla or any(op.kind in ("pauli_channel", "delay") for op in _walk(ops)),
+            idle=tuple(sorted(idle.items())),
+            readout=tuple(readout),
+        )
+        # Drop the qubits nothing acts on, as Aer does. A transpiled circuit is as wide
+        # as its device, and Maestro would otherwise simulate every qubit of a noisy
+        # circuit for an expectation value.
+        keep = self.active_qubits
+        if len(keep) == self.num_qubits:
+            return dataclasses.replace(
+                self, ops=ops, saves=saves, noise=noise, ancilla=ancilla if uses_ancilla else None
+            )
+        index = {q: i for i, q in enumerate(keep)}
+        index[ancilla] = len(keep)
+        noise = dataclasses.replace(
+            noise,
+            idle=tuple((index[q], p) for q, p in noise.idle),
+            readout=tuple((index[q], a, b) for q, a, b in noise.readout if q in index),
+        )
+        return dataclasses.replace(
+            self,
+            num_qubits=len(keep),
+            ops=[_remap(op, index) for op in ops],
+            saves=[
+                dataclasses.replace(save, qubits=tuple(index[q] for q in save.qubits))
+                for save in saves
+            ],
+            noise=noise,
+            ancilla=len(keep) if uses_ancilla else None,
+            qubit_map=tuple(keep),
+        )
+
+
+def _remap(op: _Op, index: dict[int, int]) -> _Op:
+    if op.kind == "if":
+        return dataclasses.replace(
+            op,
+            true_body=tuple(_remap(o, index) for o in op.true_body),
+            false_body=None
+            if op.false_body is None
+            else tuple(_remap(o, index) for o in op.false_body),
+        )
+    return dataclasses.replace(op, qubits=tuple(index[q] for q in op.qubits))
+
+
+def _walk(ops):
+    for op in ops:
+        yield op
+        if op.kind == "if":
+            yield from _walk(op.true_body)
+            yield from _walk(op.false_body or ())
+
 
 def build_maestro(ops: list[_Op], angles: np.ndarray | None = None) -> MaestroCircuit:
     """Replay ops without classical control onto a new Maestro circuit.
@@ -193,6 +446,10 @@ def build_maestro(ops: list[_Op], angles: np.ndarray | None = None) -> MaestroCi
             circuit.measure([(op.qubits[0], op.clbits[0])])
         elif op.kind == "reset":
             circuit.reset(op.qubits[0])
+        elif op.kind == "pauli_channel":
+            circuit.pauli_channel(list(op.qubits), list(op.probabilities))
+        elif op.kind == "delay":
+            circuit.delay(op.qubits[0], float(op.angles[0]))
         else:
             getattr(circuit, op.kind)(*op.qubits, *_angles(op, angles))
     return circuit
@@ -220,6 +477,8 @@ def _qasm(op: _Op, row: np.ndarray) -> str:
         if op.false_body is not None:
             text += f" else {{ {' '.join(_qasm(o, row) for o in op.false_body)} }}"
         return text
+    if op.kind in ("noise", "pauli_channel", "delay"):
+        raise RuntimeError("Noise operations can't be written as OpenQASM.")
     qubits = ", ".join(f"q[{q}]" for q in op.qubits)
     if not op.angles:
         return f"{op.kind} {qubits};"
@@ -228,20 +487,37 @@ def _qasm(op: _Op, row: np.ndarray) -> str:
 
 
 class _Converter:
-    def __init__(self, circuit: QuantumCircuit, *, estimator: bool):
+    def __init__(self, circuit: QuantumCircuit, *, estimator: bool, noise, saves: bool):
         self.circuit = circuit
         self.estimator = estimator
+        self.noise = noise
+        self.allow_saves = saves
+        # Unrolling binds loop variables, which Qiskit 1.x lists among the parameters.
+        loop_variables = _loop_variables(circuit)
         self.result = ConvertedCircuit(
             num_qubits=circuit.num_qubits,
             num_clbits=circuit.num_clbits,
-            parameters=tuple(circuit.parameters),
+            parameters=tuple(p for p in circuit.parameters if p not in loop_variables),
         )
         self._slots: dict[ParameterExpression, int] = {}
+        self._has_reset = False
+        # Global phase matters only for a saved statevector.
+        self._track_phase = saves and any(
+            instruction.operation.name in ("save_statevector", "save_statevector_dict")
+            for instruction in circuit.data
+        )
 
     def run(self) -> ConvertedCircuit:
         qubits = [self.circuit.find_bit(q).index for q in self.circuit.qubits]
         clbits = [self.circuit.find_bit(c).index for c in self.circuit.clbits]
-        self._circuit(self.circuit, qubits, clbits, self.result.ops, in_branch=False)
+        self._phase(self.circuit.global_phase, in_branch=False)
+        self._circuit(
+            self.circuit, qubits, clbits, self.result.ops, in_branch=False, top_level=True
+        )
+        labels = [save.label for save in self.result.saves]
+        for label in labels:
+            if labels.count(label) > 1:
+                raise ValueError(f"Two save instructions use the label {label!r}.")
         return self.result
 
     def _angle(self, value, name: str) -> _Angle:
@@ -259,7 +535,28 @@ class _Converter:
                 name, f"its parameter {value!r} isn't a real angle."
             ) from None
 
-    def _circuit(self, circuit, qubits, clbits, out: list[_Op], *, in_branch: bool) -> None:
+    def _phase(self, value, *, in_branch: bool) -> None:
+        if self._track_phase and not in_branch and value != 0:
+            self.result.phases.append(self._angle(value, "global_phase"))
+
+    def _circuit(
+        self,
+        circuit,
+        qubits,
+        clbits,
+        out: list[_Op],
+        *,
+        in_branch: bool,
+        top_level: bool = False,
+        noisy: bool = True,
+    ) -> None:
+        """Convert ``circuit``'s instructions into ``out``.
+
+        ``top_level`` is true only for the circuit itself, where Aer runs its
+        custom noise passes. ``noisy`` is false inside the definition of an
+        expanded gate: Aer attaches noise to the gate as a whole.
+        """
+
         def resolve(bit: Clbit) -> int:
             # Control-flow blocks share the outer circuit's bits, so a condition
             # inside one resolves through the block's mapping.
@@ -273,11 +570,39 @@ class _Converter:
                 out,
                 resolve,
                 in_branch=in_branch,
+                top_level=top_level,
+                noisy=noisy,
             )
 
-    def _instruction(self, op, qubits, clbits, out: list[_Op], resolve, *, in_branch: bool) -> None:
+    def _noise_ops(self, keys: list[int], qubits) -> list[_Op]:
+        return [_Op("noise", tuple(qubits), noise=key) for key in keys]
+
+    def _instruction(
+        self,
+        op,
+        qubits,
+        clbits,
+        out: list[_Op],
+        resolve,
+        *,
+        in_branch: bool,
+        top_level: bool = False,
+        noisy: bool = True,
+    ) -> None:
         name = op.name
+        if name in SAVE_INSTRUCTIONS or (
+            name.startswith("save_") and type(op).__module__.startswith("qiskit_aer")
+        ):
+            self._save(op, qubits, out, in_branch=in_branch, top_level=top_level)
+            return
+        before: list[int] = []
+        after: list[int] = []
+        if self.noise is not None and noisy and not isinstance(op, ControlFlowOp):
+            before, after = self.noise.errors(op, qubits, top_level=top_level)
         if name in _IDENTITIES:
+            if name == "global_phase":
+                self._phase(op.params[0], in_branch=in_branch)
+            out.extend(self._noise_ops(before + after, qubits))
             return
         # Qiskit 1.x stores c_if conditions on the instruction itself.
         legacy_condition = (
@@ -295,7 +620,9 @@ class _Converter:
             isinstance(op, ControlledGate) and op.ctrl_state != 2**op.num_ctrl_qubits - 1
         ):
             angles = tuple(self._angle(p, name) for p in op.params)
+            out.extend(self._noise_ops(before, qubits))
             out.append(_Op(method, tuple(qubits), angles))
+            out.extend(self._noise_ops(after, qubits))
             return
         if name == "measure":
             if self.estimator:
@@ -306,14 +633,19 @@ class _Converter:
                     "circuit.remove_final_measurements().",
                 )
             self.result.has_measurements = True
+            out.extend(self._noise_ops(before, qubits))
             out.append(_Op("measure", (qubits[0],), clbits=(clbits[0],)))
+            out.extend(self._noise_ops(after, qubits))
             return
         if name == "reset":
             if in_branch:
                 raise UnsupportedInstructionError(
                     "reset", "Maestro has no conditional reset, so a reset can't go inside if_test."
                 )
+            self._has_reset = True
+            out.extend(self._noise_ops(before, qubits))
             out.append(_Op("reset", (qubits[0],)))
+            out.extend(self._noise_ops(after, qubits))
             return
         if isinstance(op, ControlFlowOp):
             self._control_flow(op, qubits, clbits, out, resolve, in_branch=in_branch)
@@ -326,13 +658,71 @@ class _Converter:
                 name,
                 "it isn't one of Maestro's native operations and has no Qiskit definition to expand.",
             )
-        self._circuit(definition, qubits, clbits, out, in_branch=in_branch)
+        out.extend(self._noise_ops(before, qubits))
+        self._phase(definition.global_phase, in_branch=in_branch)
+        self._circuit(definition, qubits, clbits, out, in_branch=in_branch, noisy=False)
+        out.extend(self._noise_ops(after, qubits))
+
+    def _save(self, op, qubits, out: list[_Op], *, in_branch: bool, top_level: bool) -> None:
+        name = op.name
+        if not self.allow_saves:
+            raise UnsupportedInstructionError(
+                name,
+                "save instructions return data through MaestroBackend.run only; the Sampler "
+                "and Estimator don't take them.",
+            )
+        if name not in SAVE_INSTRUCTIONS:
+            raise UnsupportedInstructionError(
+                name,
+                f"the supported save instructions are {', '.join(sorted(SAVE_INSTRUCTIONS))}.",
+            )
+        if in_branch or not top_level:
+            raise UnsupportedInstructionError(
+                name, "save instructions inside control flow aren't supported."
+            )
+        subtype = getattr(op, "_subtype", "single")
+        if subtype not in ("single", "average"):
+            raise UnsupportedInstructionError(
+                name,
+                "only the default save is supported, not pershot, conditional or "
+                "unnormalized ones.",
+            )
+        if self.result.has_measurements or self.result.has_control_flow:
+            raise UnsupportedInstructionError(
+                name,
+                "a save after a measurement depends on its random outcome. Move the save "
+                "before the measurements.",
+            )
+        terms = ()
+        if name in ("save_expval", "save_expval_var"):
+            terms = tuple(
+                (str(label), float(np.real(coeffs[0])), float(np.real(coeffs[1])))
+                for label, coeffs in op.params
+            )
+        self.result.saves.append(
+            Save(
+                kind=name,
+                label=op.label or name,
+                qubits=tuple(qubits),
+                terms=terms,
+                position=len(out),
+                phases=len(self.result.phases),
+                after_reset=self._has_reset,
+            )
+        )
 
     def _control_flow(
         self, op, qubits, clbits, out: list[_Op], resolve, *, in_branch: bool
     ) -> None:
         if op.name == "box":
+            self._phase(op.blocks[0].global_phase, in_branch=in_branch)
             self._circuit(op.blocks[0], qubits, clbits, out, in_branch=in_branch)
+            return
+        if op.name == "for_loop":
+            self._for_loop(op, qubits, clbits, out, in_branch=in_branch)
+            return
+        if op.name == "switch_case":
+            self._switch(op, qubits, clbits, out, resolve, in_branch=in_branch)
             return
         if op.name != "if_else":
             raise UnsupportedInstructionError(
@@ -348,6 +738,85 @@ class _Converter:
             resolve,
             in_branch=in_branch,
         )
+
+    def _for_loop(self, op, qubits, clbits, out: list[_Op], *, in_branch: bool) -> None:
+        """Unroll a loop: Qiskit fixes its index set when the circuit is built."""
+        indexset, loop_parameter, body = op.params
+        values = list(indexset)
+        for value in values:
+            if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+                raise UnsupportedInstructionError(
+                    "for_loop", f"its index set holds {value!r}, which isn't an integer."
+                )
+        for value in values:
+            block = (
+                body
+                if loop_parameter is None
+                else body.assign_parameters(
+                    {loop_parameter: int(value)}, inplace=False, strict=False
+                )
+            )
+            self._phase(block.global_phase, in_branch=in_branch)
+            self._circuit(block, qubits, clbits, out, in_branch=in_branch)
+
+    def _switch(self, op, qubits, clbits, out: list[_Op], resolve, *, in_branch: bool) -> None:
+        """Rewrite a switch as one ``if`` block per case value.
+
+        The values are distinct, so at most one block runs, as in the switch. A
+        default case becomes a block for each value no case names.
+        """
+        unsupported = UnsupportedInstructionError(
+            "switch_case",
+            "Maestro supports a switch on one clbit or a register, not on the classical "
+            f"expression {op.target}.",
+        )
+        target = op.target
+        if isinstance(target, Clbit):
+            bits = [target]
+        elif isinstance(target, ClassicalRegister):
+            bits = list(target)
+        else:
+            bits = _operand_bits(target, unsupported)
+        target_bits = {resolve(bit) for bit in bits}
+        covered: set[int] = set()
+        cases: list[tuple[int, QuantumCircuit]] = []
+        default = None
+        for values, block in op.cases_specifier():
+            for value in values:
+                if value is CASE_DEFAULT:
+                    default = block
+                else:
+                    covered.add(int(value))
+                    cases.append((int(value), block))
+        if default is not None:
+            missing = [v for v in range(2 ** len(bits)) if v not in covered]
+            if len(missing) > _MAX_DEFAULT_BRANCHES:
+                raise UnsupportedInstructionError(
+                    "switch_case",
+                    f"its default case covers {len(missing)} values of a {len(bits)}-bit "
+                    f"target, which would need more than {_MAX_DEFAULT_BRANCHES} if blocks.",
+                )
+            cases.extend((value, default) for value in missing)
+        for value, block in cases:
+            ops: list[_Op] = []
+            self._resolved_branch(
+                _equals(bits, value, resolve),
+                [(block, qubits, clbits)],
+                None,
+                ops,
+                resolve,
+                in_branch=in_branch,
+                name="switch_case",
+            )
+            for if_op in ops:
+                written = {c for o in _walk(if_op.true_body) for c in o.clbits}
+                if written & target_bits:
+                    raise UnsupportedInstructionError(
+                        "switch_case",
+                        "a case measures into the switch's own target, which a chain of if "
+                        "blocks would read again.",
+                    )
+            out.extend(ops)
 
     def _branch(
         self, condition, true_body, false_block, out: list[_Op], resolve, *, in_branch: bool
@@ -368,6 +837,30 @@ class _Converter:
                 "if_else", "Maestro doesn't support nested if_test blocks."
             )
         bits = self._condition(condition, resolve)
+        self._resolved_branch(
+            bits, true_body, false_block, out, resolve, in_branch=in_branch, name="if_else"
+        )
+
+    def _resolved_branch(
+        self,
+        bits: _Condition | None,
+        true_body,
+        false_block,
+        out: list[_Op],
+        resolve,
+        *,
+        in_branch: bool,
+        name: str,
+    ) -> None:
+        """Append an ``if`` op on a condition already resolved to bits."""
+        if self.estimator:
+            raise UnsupportedInstructionError(
+                name, "the Estimator's circuits can't measure, so they can't branch on results."
+            )
+        if in_branch:
+            raise UnsupportedInstructionError(
+                name, "Maestro doesn't support nested if_test blocks."
+            )
         if bits is not None and false_block is not None and len(bits) > 1:
             raise UnsupportedInstructionError(
                 "if_else",
@@ -445,6 +938,20 @@ class _Converter:
         return ((resolve(bits[0]), wanted),)
 
 
+def _loop_variables(circuit: QuantumCircuit) -> set[Parameter]:
+    """The loop variables of every for loop in ``circuit``, at any depth."""
+    found = set()
+    for instruction in circuit.data:
+        operation = instruction.operation
+        if not isinstance(operation, ControlFlowOp):
+            continue
+        if operation.name == "for_loop" and operation.params[1] is not None:
+            found.add(operation.params[1])
+        for block in operation.blocks:
+            found |= _loop_variables(block)
+    return found
+
+
 def _equals(bits: list[Clbit], value: int, resolve) -> _Condition | None:
     """``bits`` (least significant first) read as an integer equal ``value``.
 
@@ -502,15 +1009,21 @@ def _constant(node, unsupported: UnsupportedInstructionError) -> int:
     raise unsupported
 
 
-def convert(circuit: QuantumCircuit, *, estimator: bool = False) -> ConvertedCircuit:
+def convert(
+    circuit: QuantumCircuit, *, estimator: bool = False, noise=None, saves: bool = False
+) -> ConvertedCircuit:
     """Convert a Qiskit circuit for Maestro.
 
     Args:
         circuit: The circuit, possibly with unbound parameters.
         estimator: Reject measurements and classical control, which an
             Estimator circuit can't have.
+        noise: A :class:`~qiskit_maestro.noise.NoiseTranslator` for an Aer noise
+            model. Its errors become ``noise`` placeholders, which
+            :meth:`ConvertedCircuit.with_noise` translates.
+        saves: Accept Aer's save instructions, as :class:`MaestroBackend` does.
 
     Raises:
         UnsupportedInstructionError: naming the first instruction Maestro can't run.
     """
-    return _Converter(circuit, estimator=estimator).run()
+    return _Converter(circuit, estimator=estimator, noise=noise, saves=saves).run()

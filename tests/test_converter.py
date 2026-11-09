@@ -254,10 +254,12 @@ def test_qiskit_1_c_if_becomes_a_branch():
     assert "if (c[0]) { x q[1]; }" in converted.to_qasm(converted.angle_rows()[0])
 
 
-def _loop_circuit():
+def _break_loop_circuit():
     circuit = QuantumCircuit(1, 1)
     with circuit.for_loop(range(2)):
-        circuit.x(0)
+        circuit.measure(0, 0)
+        with circuit.if_test((circuit.clbits[0], 1)):
+            circuit.break_loop()
     return circuit
 
 
@@ -268,10 +270,14 @@ def _while_circuit():
     return circuit
 
 
-def _switch_circuit():
-    circuit = QuantumCircuit(1, 1)
-    circuit.measure(0, 0)
-    with circuit.switch(circuit.clbits[0]) as case, case(0):
+def _switch_in_if_circuit():
+    circuit = QuantumCircuit(2, 2)
+    circuit.measure([0, 1], [0, 1])
+    with (
+        circuit.if_test((circuit.clbits[0], 1)),
+        circuit.switch(circuit.clbits[1]) as case,
+        case(0),
+    ):
         circuit.x(0)
     return circuit
 
@@ -312,9 +318,9 @@ def _opaque_circuit():
 @pytest.mark.parametrize(
     "build,instruction,reason",
     [
-        (_loop_circuit, "for_loop", "loops"),
+        (_break_loop_circuit, "break_loop", "with break"),
         (_while_circuit, "while_loop", "loops"),
-        (_switch_circuit, "switch_case", "switch"),
+        (_switch_in_if_circuit, "switch_case", "nested"),
         (_nested_if_circuit, "if_else", "nested"),
         (_reset_in_if_circuit, "reset", "conditional reset"),
         (_register_else_circuit, "if_else", "else branch only"),
@@ -532,3 +538,176 @@ def test_register_value_that_does_not_fit_is_never_true(value):
     circuit = _register_circuit(3, lambda r: (r, value))
     assert _maestro_flag(circuit) == {"0"}
     assert not convert(circuit).has_control_flow
+
+
+# ---- for_loop and switch -------------------------------------------------------------
+
+
+def _unrolled_counts(circuit: QuantumCircuit, shots: int = 4000) -> dict[str, int]:
+    from qiskit_maestro import MaestroBackend
+
+    return MaestroBackend(seed_simulator=11).run(circuit, shots=shots).result().get_counts()
+
+
+def _aer_counts(circuit: QuantumCircuit, shots: int = 4000) -> dict[str, int]:
+    from qiskit_aer import AerSimulator
+
+    return AerSimulator().run(circuit, shots=shots, seed_simulator=12).result().get_counts()
+
+
+def test_for_loop_is_unrolled_with_its_loop_parameter():
+    circuit = _prepared(2)
+    with circuit.for_loop(range(1, 4)) as i:
+        circuit.rx(0.2 * i, 0)
+        circuit.cx(0, 1)
+    with circuit.for_loop([2, 0, 5]):
+        circuit.ry(0.3, 1)
+    unrolled = _prepared(2)
+    for i in range(1, 4):
+        unrolled.rx(0.2 * i, 0)
+        unrolled.cx(0, 1)
+    for _ in range(3):
+        unrolled.ry(0.3, 1)
+    converted = convert(circuit)
+    assert not converted.has_control_flow
+    assert _overlap(_maestro_state(circuit), Statevector(unrolled).data) == pytest.approx(1)
+
+
+def test_for_loop_keeps_outer_parameters_symbolic():
+    theta = Parameter("theta")
+    circuit = QuantumCircuit(1)
+    with circuit.for_loop(range(3)) as i:
+        circuit.rx(theta + i, 0)
+    converted = convert(circuit)
+    assert converted.parameters == (theta,)
+    values = BindingsArray({theta: [0.1, 0.4]})
+    rows = converted.angle_rows(values)
+    for row, value in zip(rows, [0.1, 0.4]):
+        state = np.asarray(maestro.get_statevector(converted.to_maestro(row)))
+        reference = QuantumCircuit(1)
+        for i in range(3):
+            reference.rx(value + i, 0)
+        assert _overlap(state, Statevector(reference).data) == pytest.approx(1)
+
+
+@requires_aer
+def test_for_loop_with_measurements_and_branches_matches_aer():
+    from .conftest import assert_same_distribution
+
+    circuit = QuantumCircuit(2, 3)
+    with circuit.for_loop(range(3)):
+        circuit.ry(0.7, 0)
+        circuit.measure(0, 0)
+        with circuit.if_test((circuit.clbits[0], 1)):
+            circuit.x(1)
+    circuit.measure(1, 1)
+    assert_same_distribution(_unrolled_counts(circuit), _aer_counts(circuit))
+
+
+def _switch_on_register(default: bool) -> QuantumCircuit:
+    creg = ClassicalRegister(2, "c")
+    out = ClassicalRegister(2, "out")
+    circuit = QuantumCircuit(QuantumRegister(3), creg, out)
+    circuit.h([0, 1])
+    circuit.measure([0, 1], creg)
+    with circuit.switch(creg) as case:
+        with case(0):
+            circuit.x(2)
+        with case(1, 2):
+            circuit.ry(1.1, 2)
+        if default:
+            with case(case.DEFAULT):
+                circuit.h(2)
+    circuit.measure(2, out[0])
+    return circuit
+
+
+@requires_aer
+@pytest.mark.parametrize("default", [False, True])
+def test_switch_on_a_register_matches_aer(default):
+    from .conftest import assert_same_distribution
+
+    circuit = _switch_on_register(default)
+    converted = convert(circuit)
+    assert converted.has_control_flow
+    assert_same_distribution(_unrolled_counts(circuit), _aer_counts(circuit))
+
+
+@requires_aer
+def test_switch_on_a_clbit_and_an_expression_match_aer():
+    from .conftest import assert_matches_probabilities, assert_same_distribution
+
+    circuit = QuantumCircuit(2, 2)
+    circuit.h(0)
+    circuit.measure(0, 0)
+    with circuit.switch(circuit.clbits[0]) as case:
+        with case(1):
+            circuit.x(1)
+        with case(case.DEFAULT):
+            circuit.h(1)
+    circuit.measure(1, 1)
+    assert_same_distribution(_unrolled_counts(circuit), _aer_counts(circuit))
+
+    creg = ClassicalRegister(3, "c")
+    circuit = QuantumCircuit(QuantumRegister(4), creg, ClassicalRegister(1, "out"))
+    circuit.h([0, 1, 2])
+    circuit.measure([0, 1, 2], creg)
+    # The low two bits of the register.
+    with circuit.switch(expr.cast(creg, types.Uint(2))) as case:
+        with case(3):
+            circuit.x(3)
+        with case(case.DEFAULT):
+            circuit.ry(0.4, 3)
+    circuit.measure(3, circuit.cregs[1][0])
+    # Aer can't switch on a cast, so compare with the exact distribution.
+    flip = np.sin(0.2) ** 2
+    expected = {}
+    for value in range(8):
+        p_one = 1.0 if value & 3 == 3 else flip
+        expected[f"1 {value:03b}"] = p_one / 8
+        expected[f"0 {value:03b}"] = (1 - p_one) / 8
+    assert_matches_probabilities(_unrolled_counts(circuit), expected)
+
+
+def test_switch_case_that_writes_its_target_is_rejected():
+    circuit = QuantumCircuit(1, 1)
+    circuit.measure(0, 0)
+    with circuit.switch(circuit.clbits[0]) as case, case(0):
+        circuit.x(0)
+        circuit.measure(0, 0)
+    with pytest.raises(UnsupportedInstructionError, match="own target") as error:
+        convert(circuit)
+    assert error.value.instruction == "switch_case"
+
+
+def test_switch_default_on_a_wide_register_is_rejected():
+    creg = ClassicalRegister(8, "c")
+    circuit = QuantumCircuit(QuantumRegister(1), creg)
+    circuit.measure(0, creg[0])
+    with circuit.switch(creg) as case:
+        with case(0):
+            circuit.x(0)
+        with case(case.DEFAULT):
+            circuit.h(0)
+    with pytest.raises(UnsupportedInstructionError, match="more than 64 if blocks"):
+        convert(circuit)
+
+
+def test_switch_in_estimator_circuits_is_rejected():
+    circuit = QuantumCircuit(1, 1)
+    with circuit.switch(circuit.clbits[0]) as case, case(0):
+        circuit.x(0)
+    with pytest.raises(UnsupportedInstructionError, match="Estimator"):
+        convert(circuit, estimator=True)
+
+
+def test_transpile_keeps_loops_and_switches():
+    from qiskit import transpile
+
+    from qiskit_maestro import MaestroBackend
+
+    circuit = _switch_on_register(default=True)
+    with circuit.for_loop(range(2)):
+        circuit.h(0)
+    compiled = transpile(circuit, MaestroBackend())
+    assert {"switch_case", "for_loop"} <= set(compiled.count_ops())
