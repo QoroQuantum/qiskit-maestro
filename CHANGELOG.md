@@ -30,11 +30,16 @@
   and the density matrix for small noisy ones, by Aer's rule.
 - `for_loop` is unrolled, and `switch` becomes one `if` block per case value.
   Both are in the backend's target, so `transpile` keeps them.
-- Noisy sampling on pure-state methods runs its shots in parallel: up to 64 tasks
-  of at least 16 shots each, so that a few hundred shots already use every core.
-  The split depends on the shot count only, so seeded results don't depend on
-  the CPU count. With a device's depolarizing and readout errors, sampling is
-  as fast as Aer's at 8 and 10 qubits and twice as fast at 12.
+- Requires `qoro-maestro` 0.3.14, which runs a call's noise realizations on its
+  own workers. Noisy sampling on pure-state methods hands each parameter set's
+  shots to one Maestro call, with `return_samples=True` so that seeded runs take
+  Maestro's direct path, and the plugin no longer runs such calls on threads of
+  its own. Seeded results don't depend on the number of workers. With a
+  device's depolarizing and readout errors, sampling is 2.3 to 3.6 times as
+  fast as Aer's at 8 to 12 qubits.
+- `MaestroEstimator`: a circuit with a `reset` on a pure-state method averages
+  1,024 trajectories, as Aer's `EstimatorV2` averages over shots, instead of
+  following one random outcome. Density matrix stays exact.
 - Noise models translate about 13 times faster: the plugin computes each
   error's Pauli transfer matrix from its instructions, instead of through
   Qiskit's `SuperOp`, and falls back to Qiskit for instructions it doesn't know.

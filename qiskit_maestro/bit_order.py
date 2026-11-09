@@ -64,6 +64,26 @@ def maestro_counts_to_outcomes(
     return outcomes, frequencies
 
 
+def maestro_samples_to_outcomes(samples, num_clbits: int) -> tuple[np.ndarray, np.ndarray]:
+    """Turn Maestro's per-shot rows (``return_samples=True``) into outcome rows and frequencies.
+
+    Each row has clbit 0 first and is as wide as the highest clbit the circuit
+    wrote, plus one; missing clbits are zero. The result has the form of
+    :func:`maestro_counts_to_outcomes`'s.
+    """
+    rows = np.asarray(samples, dtype=np.uint8)
+    rows = rows.reshape(len(rows), -1)
+    if rows.shape[1] > num_clbits and rows[:, num_clbits:].any():
+        raise ValueError(
+            f"Maestro returned {rows.shape[1]}-bit outcomes for a circuit with {num_clbits} clbits."
+        )
+    padded = np.zeros((len(rows), num_clbits), dtype=np.uint8)
+    width = min(rows.shape[1], num_clbits)
+    padded[:, :width] = rows[:, :width]
+    outcomes, frequencies = np.unique(padded, axis=0, return_counts=True)
+    return outcomes, frequencies.astype(np.int64)
+
+
 def _pack(bits: np.ndarray) -> np.ndarray:
     """Pack rows whose columns run from the most to the least significant bit."""
     pad = -bits.shape[-1] % 8

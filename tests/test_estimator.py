@@ -193,17 +193,25 @@ def test_projector_terms():
     assert evs == pytest.approx(np.real(state.conj() @ matrix @ state), abs=1e-10)
 
 
-def test_reset_follows_one_trajectory_on_pure_state_methods():
+@pytest.mark.parametrize("method", ["statevector", "matrix_product_state", "stabilizer"])
+def test_reset_averages_trajectories_on_pure_state_methods(method):
+    # Resetting half a Bell pair leaves the other half maximally mixed: <Z> = 0.
+    # Each trajectory gives +-1, and the value averages 1,024 of them, as Aer's
+    # EstimatorV2 averages over shots.
     circuit = QuantumCircuit(2)
     circuit.h(0)
     circuit.cx(0, 1)
     circuit.reset(0)
-    values = {
-        seed: MaestroEstimator(seed=seed).run([(circuit, "ZI")]).result()[0].data.evs
-        for seed in range(8)
-    }
-    assert all(abs(abs(v) - 1) < 1e-10 for v in values.values())
-    assert {np.sign(v) for v in values.values()} == {-1.0, 1.0}
+    values = [
+        float(
+            MaestroEstimator(seed=seed, method=method).run([(circuit, "ZI")]).result()[0].data.evs
+        )
+        for seed in range(4)
+    ]
+    assert all(abs(v) < 5 / np.sqrt(1024) for v in values)
+    assert len(set(values)) > 1
+    again = MaestroEstimator(seed=0, method=method).run([(circuit, "ZI")]).result()[0].data.evs
+    assert float(again) == values[0]
 
 
 def test_reset_is_exact_on_density_matrix():

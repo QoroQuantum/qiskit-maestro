@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import inspect
-import sys
 import time
 import uuid
 import warnings
@@ -210,26 +209,32 @@ class MaestroBackend(BackendV2):
         seed = options["seed_simulator"]
         rng = np.random.default_rng(seed)
         seeds = _execution.maestro_seeds(rng, seed is not None, len(circuits))
-        widest = max((c.num_qubits for c, _ in prepared), default=0)
-        workers = parallel_workers(options, widest, len(circuits))
-        # Noisy circuits split their shots over threads too; share the threads out.
-        inner_workers = max(1, parallel_workers(options, widest, sys.maxsize) // workers)
 
         def one(i: int) -> tuple[_execution.Samples | None, tuple | None]:
             circuit, circuit_options = prepared[i]
             samples = saved = None
             if circuit.has_measurements:
                 rows = circuit.angle_rows()
-                samples = _execution.sample(
-                    circuit, rows, shots, circuit_options, [seeds[i]], inner_workers
-                )[0]
+                samples = _execution.sample(circuit, rows, shots, circuit_options, [seeds[i]])[0]
             if circuit.saves:
                 row = circuit.angle_rows()[0]
                 saved = _execution.saved_data(circuit, row, circuit_options, seeds[i], shots)
             return samples, saved
 
         start = time.perf_counter()
-        outputs = _execution.run_parallel(one, len(circuits), workers)
+        # Circuits whose noise Maestro samples on its own workers run one at a
+        # time; the others run in parallel.
+        own = [i for i, (c, _) in enumerate(prepared) if _execution.runs_own_workers(c)]
+        rest = sorted(set(range(len(circuits))) - set(own))
+        widest = max((prepared[i][0].num_qubits for i in rest), default=0)
+        outputs: list = [None] * len(circuits)
+        parallel = _execution.run_parallel(
+            lambda k: one(rest[k]), len(rest), parallel_workers(options, widest, len(rest))
+        )
+        for i, output in zip(rest, parallel):
+            outputs[i] = output
+        for i in own:
+            outputs[i] = one(i)
         experiments = [
             _experiment(circuit, samples, saved, shots, memory, rng, prepared[i][1], seeds[i])
             for i, (circuit, (samples, saved)) in enumerate(zip(circuits, outputs))

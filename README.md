@@ -17,8 +17,8 @@ and an `EstimatorV2`.
 pip install qiskit-maestro
 ```
 
-This installs Maestro (`qoro-maestro`) as well. It needs Python 3.10 or later and
-works with Qiskit 1.1 and later, including 2.x.
+This installs Maestro (`qoro-maestro` 0.3.14 or later) as well. It needs Python 3.10
+or later and works with Qiskit 1.1 and later, including 2.x.
 
 ## Switch from Aer
 
@@ -257,8 +257,9 @@ Not supported yet:
   `switch` case that measures into the switch's own target. Each raises
   `UnsupportedInstructionError` naming the instruction.
 - **Measurements in Estimator circuits.** As in `StatevectorEstimator`, they
-  raise an error. Resets are allowed: statevector and MPS follow one random
-  outcome, as `StatevectorEstimator` does, and density matrix is exact.
+  raise an error. Resets are allowed: pure-state methods average 1,024
+  trajectories, as Aer's `EstimatorV2` averages over shots, and density matrix
+  is exact.
 - **Other save instructions**, such as `save_density_matrix`, `save_amplitudes`
   and `save_state`, and saves that are per shot, conditional, unnormalized, after
   a measurement or inside control flow. The Sampler and Estimator don't take

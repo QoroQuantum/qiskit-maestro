@@ -294,32 +294,38 @@ def test_seeded_noisy_runs_repeat():
 
 
 @pytest.mark.parametrize("shots", [5, 200, 3000])
-def test_seeded_noisy_runs_dont_depend_on_the_thread_count(shots):
+def test_seeded_noisy_runs_dont_depend_on_the_worker_count(shots):
+    """Maestro spreads a call's noise realizations over its workers; seeds fix the result."""
     model = _strong_noise_model()
     circuits = [_circuit(measure=True), _circuit(measure=True).reverse_bits()]
     counts = [
-        MaestroBackend(noise_model=model, seed_simulator=9, max_parallel_experiments=workers)
+        MaestroBackend(
+            noise_model=model,
+            seed_simulator=9,
+            max_parallel_experiments=threads,
+            maestro_options=None if workers is None else {"max_simulators": workers},
+        )
         .run(circuits, shots=shots)
         .result()
         .get_counts()
-        for workers in (1, 3, 0)
+        for threads, workers in ((1, 1), (3, 3), (0, None))
     ]
     assert counts[0] == counts[1] == counts[2]
 
 
-def test_noisy_shots_split_by_the_shot_count_alone():
-    from qiskit_maestro._execution import noisy_chunks
-
-    for shots in (1, 15, 16, 33, 200, 1024, 4097, 10**6):
-        chunks = noisy_chunks(shots)
-        assert sum(chunks) == shots
-        assert 1 <= len(chunks) <= 64
-        assert max(chunks) - min(chunks) <= 1
-        assert len(chunks) == 1 or min(chunks) >= 16
+def test_noisy_memory_has_one_row_per_shot():
+    model = _strong_noise_model()
+    result = MaestroBackend(noise_model=model, seed_simulator=4).run(
+        _circuit(measure=True), shots=500, memory=True
+    )
+    memory = result.result().get_memory()
+    counts = result.result().get_counts()
+    assert len(memory) == 500
+    assert {key: memory.count(key) for key in set(memory)} == counts
 
 
 def test_noisy_parameter_sets_keep_their_own_angles():
-    """Parameter sets split into tasks that share each set's circuit, never another's."""
+    """Each parameter set runs its own circuit, with its own noise realizations."""
     from qiskit.circuit import Parameter
     from qiskit_aer.primitives import SamplerV2 as AerSampler
 

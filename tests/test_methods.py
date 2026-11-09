@@ -166,7 +166,7 @@ def test_stabilizer_rejects_non_clifford_gates():
     circuit = QuantumCircuit(1)
     circuit.h(0)
     circuit.t(0)
-    with pytest.raises(RuntimeError, match="non-clifford"):
+    with pytest.raises(RuntimeError, match="(?i)non-clifford"):
         MaestroEstimator(method="stabilizer").run([(circuit, "X")]).result()
 
 

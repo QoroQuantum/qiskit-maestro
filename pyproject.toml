@@ -29,7 +29,7 @@ classifiers = [
 ]
 dependencies = [
     "qiskit>=1.1",
-    "qoro-maestro>=0.3.10",
+    "qoro-maestro>=0.3.14",
     "numpy>=1.23",
 ]
 

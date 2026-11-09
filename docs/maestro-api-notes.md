@@ -2,7 +2,10 @@
 
 Studied against `qoro-maestro==0.3.10` (PyPI), Qiskit 2.6.1 and Qiskit Aer 0.18.2,
 on macOS arm64 (no GPU). Every claim below was checked by running code, and
-the ones the plugin relies on are covered by its test suite.
+the ones the plugin relies on are covered by its test suite. Gap 13 and the
+`reset` semantics in `estimate` were rechecked against 0.3.14 (core `main` at
+`d09d9ae`, built from source), which the plugin now requires; the other gaps
+have not been rechecked yet.
 
 ## How the core works
 
@@ -188,23 +191,21 @@ today; none of these are hidden from users.
     Workaround: noisy circuits drop the qubits no operation touches, as Aer's
     truncation does, and observables are remapped (X or Y on a dropped qubit
     gives 0). Ask: drop untouched qubits before simulating.
-13. **`noisy_execute` runs realizations one after another, partly under the
-    GIL.** In 0.3.10 (and 0.3.13), `execute_noise_batches` loops over the
-    realizations in one thread. Each one injects noise (cloning every
-    operation) and builds a Python dict of counts with the GIL held, and
-    releases it only inside `SampleCircuit`, which also redoes cone analysis
-    and simulator setup per realization (0.08–0.13 ms fixed cost at 8–13
-    qubits). One realization per shot, as sampled noise needs, so 200 shots of
-    a 10-qubit device circuit took 93 ms in one call, against Aer's 30 ms on
-    12 threads, although one realization (0.46 ms) is cheaper than an Aer shot
-    on one thread (0.6 ms). Workaround: the plugin splits the shots into up to
-    64 tasks of at least 16 shots, with derived seeds, and runs them on
-    threads (26 ms). The GIL-held part still caps the speedup: 20,000 shots
-    stop improving at 8 threads (1.8 s, 4–6 times one thread; the fitted
-    serial part is 26–56 µs per shot). Core `main` (unreleased) runs
-    realizations on workers with the GIL released (`ExecuteNoisy`); once that
-    is released, the plugin should hand each parameter set's shots to one
-    call instead.
+13. **Fixed in 0.3.14: `noisy_execute` ran realizations one after another.**
+    In 0.3.10 to 0.3.13, `execute_noise_batches` looped over the realizations
+    in one thread, holding the GIL to inject noise and build each one's
+    counts, so 200 shots of a 10-qubit device circuit took 93 ms against
+    Aer's 30 ms, and threads in the plugin stopped helping at 8 (the fitted
+    serial part was 26–56 µs per shot). 0.3.14 (`ExecuteNoisy`) runs them on
+    up to 16 workers with the GIL released: the same 200 shots take 6.7 ms,
+    and 20,000 take 0.58 s against Aer's 2.2 s, scaling almost linearly to 8
+    workers. Seeded results don't depend on the worker count. The plugin
+    makes one call per parameter set and doesn't add threads of its own,
+    which would oversubscribe the CPU (splitting into 64 calls made a
+    4,000-shot run 13 times slower). Remaining friction: seeded calls that
+    return counts skip the direct path that unseeded calls and
+    `return_samples=True` take (12.6 against 6.5 ms at 200 shots), so the
+    plugin asks for samples and counts them itself.
 14. **`get_statevector` needs a statevector or MPS.** The stabilizer and
     tensor-network methods raise ("Invalid simulation type for obtaining the
     amplitude"). The plugin rejects `save_statevector` on them.
@@ -215,12 +216,13 @@ today; none of these are hidden from users.
 
 ## Semantics that match Qiskit's references
 
-- A mid-circuit `reset` inside `estimate`: pure-state methods follow one
-  seeded trajectory and density matrix is exact (checked: ⟨Z₁⟩ after
-  resetting half a Bell pair is ±1 on statevector and MPS, 0 on density
-  matrix). Qiskit's
-  `StatevectorEstimator` also follows one trajectory, so the plugin allows
-  resets and documents this.
+- A mid-circuit `reset` inside `estimate`: in 0.3.14, pure-state methods
+  average 100 trajectories (`estimate_evaluation: "trajectory_average"`) and
+  density matrix is exact; 0.3.10 followed one seeded trajectory. The plugin
+  averages 1,024 through `noisy_estimate_montecarlo` with an empty noise
+  model, as Aer's `EstimatorV2` averages over shots (checked: ⟨Z₁⟩ after
+  resetting half a Bell pair is within 0.16 of 0 on statevector, MPS and
+  stabilizer, and exactly 0 on density matrix).
 - `StatevectorEstimator` reports `stds = 0` even when `precision > 0` adds
   noise. The plugin reports `stds = precision` in that case, because that is the
   standard deviation of the value it returns. This is the one intentional

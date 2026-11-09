@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import dataclasses
-import threading
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -15,7 +14,7 @@ from typing import Any, TypeVar
 import maestro
 import numpy as np
 
-from .bit_order import maestro_counts_to_outcomes
+from .bit_order import maestro_counts_to_outcomes, maestro_samples_to_outcomes
 from .converter import ConvertedCircuit, NoiseSpec, Save, build_maestro
 from .exceptions import UnsupportedInstructionError
 from .options import check_device, parallel_workers, simulator_config
@@ -64,24 +63,17 @@ def maestro_seeds(rng: np.random.Generator, seeded: bool, count: int) -> list[in
 
 
 def _strip_counts(result: Mapping[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in result.items() if k != "counts"}
+    return {k: v for k, v in result.items() if k not in ("counts", "samples")}
 
 
-# Sampled noise runs one realization per shot, and Maestro (up to 0.3.13) runs a
-# call's realizations one after another, so the shots are split into tasks that
-# run in parallel. Revisit this when a release runs realizations on its own
-# workers. The split depends on the shot count only, which keeps seeded results
-# independent of the CPU count: tasks of at least this many shots...
-_NOISY_MIN_SHOTS_PER_TASK = 16
-# ...and at most this many tasks per parameter set.
-_NOISY_MAX_TASKS = 64
+def runs_own_workers(circuit: ConvertedCircuit) -> bool:
+    """Whether Maestro spreads each of the circuit's calls over its own workers.
 
-
-def noisy_chunks(shots: int) -> list[int]:
-    """The shots of each task, for a circuit that runs one noise realization per shot."""
-    count = max(1, min(_NOISY_MAX_TASKS, shots // _NOISY_MIN_SHOTS_PER_TASK))
-    base, extra = divmod(shots, count)
-    return [base + (j < extra) for j in range(count)]
+    Sampled noise runs one noise realization per shot, and Maestro runs the
+    realizations of a call in parallel. Running such calls on threads too would
+    oversubscribe the CPU, so their callers run them one at a time.
+    """
+    return circuit.noise is not None and circuit.noise.stochastic
 
 
 def sample(
@@ -90,83 +82,46 @@ def sample(
     shots: int,
     options: Mapping[str, Any],
     seeds: Sequence[int | None],
-    max_workers: int | None = None,
 ) -> list[Samples]:
-    """Sample every row of ``angle_rows``, in parallel where that's safe.
-
-    ``max_workers`` caps the threads, for callers that already run several
-    of these in parallel.
-    """
+    """Sample every row of ``angle_rows``, in parallel where that's safe."""
     noise = circuit.noise
-    chunks = noisy_chunks(shots) if noise is not None and noise.stochastic else [shots]
-    tasks = [(i, j) for i in range(len(angle_rows)) for j in range(len(chunks))]
 
-    def task_seed(i: int, j: int) -> int | None:
-        if seeds[i] is None or len(chunks) == 1:
-            return seeds[i]
-        return int(np.random.default_rng([seeds[i], j]).integers(0, _MAX_SEED))
-
-    # The tasks of a row share its Maestro circuit, built once: building one takes
-    # as long as a few realizations, and holds the GIL. Maestro only reads the
-    # circuit, copying it to inject noise. A row's circuit is dropped after its
-    # last task.
-    lock = threading.Lock()
-    built: dict[int, Any] = {}
-    pending = [len(chunks)] * len(angle_rows)
-
-    def acquire(i: int):
-        if len(chunks) == 1:
-            return circuit.build(angle_rows[i])
-        with lock:
-            if i not in built:
-                built[i] = circuit.build(angle_rows[i])
-            return built[i]
-
-    def release(i: int) -> None:
-        with lock:
-            pending[i] -= 1
-            if not pending[i]:
-                built.pop(i, None)
-
-    def one(t: int) -> dict[str, Any]:
-        i, j = tasks[t]
-        config = simulator_config(options, task_seed(i, j))
-        maestro_circuit = acquire(i)
-        try:
-            if noise is None or not (noise.active or noise.readout):
-                result = maestro_circuit.execute(config=config, shots=chunks[j])
-            else:
-                # Sampled noise needs a fresh draw for every shot, as in Aer's
-                # trajectories. Exact (density-matrix) noise is the same for all of them.
-                result = maestro_circuit.noisy_execute(
-                    noise.maestro_model(),
-                    config=config,
-                    shots=chunks[j],
-                    noise_realizations=chunks[j] if noise.stochastic else 1,
-                )
-        finally:
-            release(i)
+    def one(i: int) -> Samples:
+        config = simulator_config(options, seeds[i])
+        maestro_circuit = circuit.build(angle_rows[i])
+        if noise is None or not (noise.active or noise.readout):
+            result = maestro_circuit.execute(config=config, shots=shots)
+        elif noise.stochastic:
+            # A fresh noise draw for every shot, as in Aer's trajectories. With
+            # return_samples, Maestro samples each realization directly even when
+            # seeded; with counts, seeded calls take a slower path.
+            result = maestro_circuit.noisy_execute(
+                noise.maestro_model(),
+                config=config,
+                shots=shots,
+                noise_realizations=shots,
+                return_samples=True,
+            )
+        else:
+            # Exact (density-matrix) noise is the same for every shot.
+            result = maestro_circuit.noisy_execute(
+                noise.maestro_model(), config=config, shots=shots, noise_realizations=1
+            )
         check_device(result, options)
-        return result
+        if "samples" in result:
+            outcomes, frequencies = maestro_samples_to_outcomes(
+                result["samples"], circuit.num_clbits
+            )
+        else:
+            outcomes, frequencies = maestro_counts_to_outcomes(result["counts"], circuit.num_clbits)
+        return Samples(outcomes, frequencies, _strip_counts(result))
 
-    workers = parallel_workers(options, circuit.num_qubits, len(tasks))
-    if max_workers is not None:
-        workers = min(workers, max_workers)
-    results = run_parallel(one, len(tasks), workers)
-    samples = []
-    for i in range(len(angle_rows)):
-        parts = results[i * len(chunks) : (i + 1) * len(chunks)]
-        counts: dict[str, int] = {}
-        for part in parts:
-            for outcome, count in part["counts"].items():
-                counts[outcome] = counts.get(outcome, 0) + count
-        outcomes, frequencies = maestro_counts_to_outcomes(counts, circuit.num_clbits)
-        info = _strip_counts(parts[0])
-        if len(parts) > 1:
-            info["time_taken"] = sum(part.get("time_taken", 0.0) for part in parts)
-            info["noise_realizations"] = shots
-        samples.append(Samples(outcomes, frequencies, info))
-    return samples
+    workers = (
+        1
+        if runs_own_workers(circuit)
+        else parallel_workers(options, circuit.num_qubits, len(angle_rows))
+    )
+    return run_parallel(one, len(angle_rows), workers)
 
 
 def _estimate_options(options: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -200,9 +155,10 @@ def _expectations(
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Expectation values of Maestro-order Pauli strings on one Maestro circuit.
 
-    A circuit with sampled noise, or with resets a pure-state method follows one
-    random outcome of (``stochastic``), is averaged over ``trajectories``
-    independent runs, as Aer averages over shots. Exact noise needs one run.
+    A circuit with sampled noise, or with resets that a pure-state method applies
+    to one random outcome per run (``stochastic``), is averaged over
+    ``trajectories`` independent runs, as Aer averages over shots. Exact noise
+    needs one run.
     """
     config = simulator_config(options, seed)
     stochastic = stochastic or (noise is not None and noise.stochastic)
@@ -234,11 +190,12 @@ def estimate(
     """Expectation values of Maestro-order Pauli ``labels[i]`` for row ``i``.
 
     Returns ``(values, info)`` per row; ``info`` is ``None`` when the row needed
-    no simulation. With sampled noise, values are averaged over ``trajectories``
-    noise realizations.
+    no simulation. With sampled noise, or resets on a pure-state method, values
+    are averaged over ``trajectories`` runs.
     """
 
     options = _estimate_options(options)
+    resets = options["method"] != "density_matrix" and any(op.kind == "reset" for op in circuit.ops)
 
     def one(i: int) -> tuple[np.ndarray, dict[str, Any] | None]:
         if not labels[i]:
@@ -259,11 +216,17 @@ def estimate(
                 seeds[i],
                 circuit.noise,
                 trajectories,
+                stochastic=resets,
             )
             values.update(zip(needed, result.tolist()))
         return np.array([values[label] for label in reduced], dtype=float), info
 
-    workers = parallel_workers(options, circuit.num_qubits, len(angle_rows))
+    # Averaged runs go to Maestro's own workers, one row at a time.
+    workers = (
+        1
+        if runs_own_workers(circuit) or resets
+        else parallel_workers(options, circuit.num_qubits, len(angle_rows))
+    )
     return run_parallel(one, len(angle_rows), workers)
 
 
