@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from functools import reduce
+from functools import cache, reduce
 
 import maestro
 import numpy as np
@@ -49,6 +49,149 @@ _CHI = np.array([[1, 1, 1, 1], [1, 1, -1, -1], [1, -1, 1, -1], [1, -1, -1, 1]], 
 
 # Instructions Aer never attaches noise to, whatever the model says.
 _NOISELESS = frozenset({"barrier"})
+
+_PAULI_MATRICES = (
+    np.eye(2, dtype=complex),
+    np.array([[0, 1], [1, 0]], dtype=complex),
+    np.array([[0, -1j], [1j, 0]], dtype=complex),
+    np.array([[1, 0], [0, -1]], dtype=complex),
+)
+_PAULI_INDEX = {"I": 0, "X": 1, "Y": 2, "Z": 3}
+_PAULI_GATES = {"id": 0, "x": 1, "y": 2, "z": 3}
+
+# Kraus operators of a reset to |0>.
+_RESET = (
+    np.array([[1, 0], [0, 0]], dtype=complex),
+    np.array([[0, 1], [0, 0]], dtype=complex),
+)
+
+
+@cache
+def _pauli_basis(n: int) -> np.ndarray:
+    """The n-qubit Paulis, shape ``(4**n, 2**n, 2**n)``; base-4 digit k of the index is qubit k."""
+    basis = np.array(
+        [
+            reduce(np.kron, [_PAULI_MATRICES[i // 4**k % 4] for k in reversed(range(n))])
+            for i in range(4**n)
+        ]
+    )
+    basis.flags.writeable = False
+    return basis
+
+
+@cache
+def _pauli_ptm(index: int, n: int) -> np.ndarray:
+    """PTM of the n-qubit Pauli ``index``: +1 on the Paulis it commutes with, -1 on the rest."""
+    signs = reduce(np.kron, [_CHI[index // 4**k % 4] for k in reversed(range(n))])
+    ptm = np.diag(signs)
+    ptm.flags.writeable = False
+    return ptm
+
+
+def _kraus_ptm(kraus) -> np.ndarray:
+    """PTM of the channel with these Kraus operators: ``R[i, j] = Tr(P_i E(P_j)) / d``."""
+    kraus = np.asarray(kraus, dtype=complex)
+    d = kraus.shape[-1]
+    paulis = _pauli_basis(d.bit_length() - 1)
+    # images[j] = sum over m of K_m P_j K_m^dagger.
+    images = (kraus[:, None] @ paulis[None] @ kraus.conj().transpose(0, 2, 1)[:, None]).sum(axis=0)
+    # Tr(P_i M) = sum over a, b of P_i[a, b] M[b, a].
+    return paulis.reshape(d * d, -1) @ images.transpose(0, 2, 1).reshape(d * d, -1).T / d
+
+
+_IDENTITY_PTM = np.eye(4)
+_IDENTITY_PTM.flags.writeable = False
+# Swaps the two base-4 digits of a two-qubit PTM index.
+_SWAP_DIGITS = np.array([i // 4 + 4 * (i % 4) for i in range(16)])
+
+
+def _embed(ptm: np.ndarray, qubits: tuple[int, ...], n: int) -> np.ndarray | None:
+    """An instruction's PTM on ``qubits`` of an error on ``n <= 2`` qubits, or ``None``."""
+    if qubits == tuple(range(n)):
+        return ptm
+    if n == 2 and qubits == (0,):
+        # kron(identity, ptm): qubit 0 is the less significant digit.
+        return (_IDENTITY_PTM[:, None, :, None] * ptm[None, :, None, :]).reshape(16, 16)
+    if n == 2 and qubits == (1,):
+        return (ptm[:, None, :, None] * _IDENTITY_PTM[None, :, None, :]).reshape(16, 16)
+    if n == 2 and qubits == (1, 0):
+        return ptm[np.ix_(_SWAP_DIGITS, _SWAP_DIGITS)]
+    return None
+
+
+def _instruction_ptm(operation) -> np.ndarray | None:
+    """PTM of one instruction of an Aer error, on its own qubits, or ``None`` if unknown."""
+    name = operation.name
+    if name in _PAULI_GATES:
+        return _pauli_ptm(_PAULI_GATES[name], 1)
+    if name == "pauli":
+        # The label's last letter acts on the instruction's first qubit. A sign or
+        # phase prefix doesn't change the channel.
+        label = str(operation.params[0]).lstrip("+-i")
+        index = sum(_PAULI_INDEX[letter] * 4**k for k, letter in enumerate(reversed(label)))
+        return _pauli_ptm(index, len(label))
+    if name == "reset" and operation.num_qubits == 1:
+        return _kraus_ptm(_RESET)
+    if name == "kraus":
+        return _kraus_ptm(operation.params)
+    if getattr(operation, "num_clbits", 0) == 0 and hasattr(operation, "to_matrix"):
+        from qiskit.circuit.exceptions import CircuitError
+
+        try:
+            matrix = operation.to_matrix()
+        except (CircuitError, TypeError, ValueError):
+            # No matrix, or unbound parameters: Qiskit's conversion decides.
+            return None
+        return _kraus_ptm([matrix])
+    return None
+
+
+def _content_key(operation, qubits: tuple[int, ...]):
+    """A key equal for instructions with the same channel, or ``None`` if unsure."""
+    try:
+        params = tuple(
+            np.asarray(p, dtype=complex).tobytes() if isinstance(p, np.ndarray) else p
+            for p in operation.params
+        )
+        hash(params)
+    except (TypeError, ValueError):
+        return None
+    return operation.name, qubits, params
+
+
+def error_ptm(error) -> np.ndarray:
+    """The Pauli transfer matrix of an Aer ``QuantumError`` on up to two qubits.
+
+    Computed from each circuit's instructions, which is much faster than going
+    through :class:`~qiskit.quantum_info.SuperOp`. Qiskit's conversion is the
+    fallback for instructions this doesn't know. Both index the PTM with qubit 0
+    as the least significant base-4 digit.
+    """
+    n = error.num_qubits
+    total = np.zeros((4**n, 4**n))
+    # Aer's composed errors repeat the same Kraus instruction in many circuits.
+    seen: dict = {}
+    for circuit, probability in zip(error.circuits, error.probabilities):
+        ptm = None
+        for instruction in circuit.data:
+            operation = instruction.operation
+            qubits = tuple(circuit.find_bit(q).index for q in instruction.qubits)
+            key = None if instruction.clbits else _content_key(operation, qubits)
+            part = seen.get(key) if key is not None else None
+            if part is None:
+                part = None if instruction.clbits else _instruction_ptm(operation)
+                if part is not None:
+                    part = _embed(part, qubits, n)
+                if part is None or np.max(np.abs(part.imag)) > _TOLERANCE:
+                    from qiskit.quantum_info import PTM
+
+                    return np.asarray(PTM(error.to_quantumchannel()).data, dtype=complex)
+                part = part.real
+                if key is not None:
+                    seen[key] = part
+            ptm = part if ptm is None else part @ ptm
+        total += probability * (np.eye(4**n) if ptm is None else ptm)
+    return total
 
 
 def is_aer_noise_model(value) -> bool:
@@ -247,9 +390,7 @@ class NoiseTranslator:
                 "places noise channels on one or two.",
                 qubits,
             )
-        from qiskit.quantum_info import PTM
-
-        ptm = np.asarray(PTM(error.to_quantumchannel()).data, dtype=complex)
+        ptm = np.asarray(error_ptm(error), dtype=complex)
         if np.max(np.abs(ptm.imag)) > _TOLERANCE:
             raise UnsupportedNoiseError(name, "its noise isn't a valid channel.", qubits)
         excited = tuple(self.excited_population(q) if family == "exact" else 0.0 for q in qubits)

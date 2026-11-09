@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -66,9 +67,21 @@ def _strip_counts(result: Mapping[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in result.items() if k != "counts"}
 
 
-# Shots per task when sampled noise runs one realization per shot. Tasks run in
-# parallel, and a fixed size keeps seeded results independent of the CPU count.
-_NOISY_SHOTS_PER_TASK = 1024
+# Sampled noise runs one realization per shot, and Maestro (up to 0.3.13) runs a
+# call's realizations one after another, so the shots are split into tasks that
+# run in parallel. Revisit this when a release runs realizations on its own
+# workers. The split depends on the shot count only, which keeps seeded results
+# independent of the CPU count: tasks of at least this many shots...
+_NOISY_MIN_SHOTS_PER_TASK = 16
+# ...and at most this many tasks per parameter set.
+_NOISY_MAX_TASKS = 64
+
+
+def noisy_chunks(shots: int) -> list[int]:
+    """The shots of each task, for a circuit that runs one noise realization per shot."""
+    count = max(1, min(_NOISY_MAX_TASKS, shots // _NOISY_MIN_SHOTS_PER_TASK))
+    base, extra = divmod(shots, count)
+    return [base + (j < extra) for j in range(count)]
 
 
 def sample(
@@ -77,16 +90,15 @@ def sample(
     shots: int,
     options: Mapping[str, Any],
     seeds: Sequence[int | None],
+    max_workers: int | None = None,
 ) -> list[Samples]:
-    """Sample every row of ``angle_rows``, in parallel where that's safe."""
+    """Sample every row of ``angle_rows``, in parallel where that's safe.
+
+    ``max_workers`` caps the threads, for callers that already run several
+    of these in parallel.
+    """
     noise = circuit.noise
-    if noise is not None and noise.stochastic:
-        chunks = [
-            min(_NOISY_SHOTS_PER_TASK, shots - done)
-            for done in range(0, shots, _NOISY_SHOTS_PER_TASK)
-        ]
-    else:
-        chunks = [shots]
+    chunks = noisy_chunks(shots) if noise is not None and noise.stochastic else [shots]
     tasks = [(i, j) for i in range(len(angle_rows)) for j in range(len(chunks))]
 
     def task_seed(i: int, j: int) -> int | None:
@@ -94,25 +106,52 @@ def sample(
             return seeds[i]
         return int(np.random.default_rng([seeds[i], j]).integers(0, _MAX_SEED))
 
+    # The tasks of a row share its Maestro circuit, built once: building one takes
+    # as long as a few realizations, and holds the GIL. Maestro only reads the
+    # circuit, copying it to inject noise. A row's circuit is dropped after its
+    # last task.
+    lock = threading.Lock()
+    built: dict[int, Any] = {}
+    pending = [len(chunks)] * len(angle_rows)
+
+    def acquire(i: int):
+        if len(chunks) == 1:
+            return circuit.build(angle_rows[i])
+        with lock:
+            if i not in built:
+                built[i] = circuit.build(angle_rows[i])
+            return built[i]
+
+    def release(i: int) -> None:
+        with lock:
+            pending[i] -= 1
+            if not pending[i]:
+                built.pop(i, None)
+
     def one(t: int) -> dict[str, Any]:
         i, j = tasks[t]
         config = simulator_config(options, task_seed(i, j))
-        maestro_circuit = circuit.build(angle_rows[i])
-        if noise is None or not (noise.active or noise.readout):
-            result = maestro_circuit.execute(config=config, shots=chunks[j])
-        else:
-            # Sampled noise needs a fresh draw for every shot, as in Aer's trajectories.
-            # Exact (density-matrix) noise is the same for all of them.
-            result = maestro_circuit.noisy_execute(
-                noise.maestro_model(),
-                config=config,
-                shots=chunks[j],
-                noise_realizations=chunks[j] if noise.stochastic else 1,
-            )
+        maestro_circuit = acquire(i)
+        try:
+            if noise is None or not (noise.active or noise.readout):
+                result = maestro_circuit.execute(config=config, shots=chunks[j])
+            else:
+                # Sampled noise needs a fresh draw for every shot, as in Aer's
+                # trajectories. Exact (density-matrix) noise is the same for all of them.
+                result = maestro_circuit.noisy_execute(
+                    noise.maestro_model(),
+                    config=config,
+                    shots=chunks[j],
+                    noise_realizations=chunks[j] if noise.stochastic else 1,
+                )
+        finally:
+            release(i)
         check_device(result, options)
         return result
 
     workers = parallel_workers(options, circuit.num_qubits, len(tasks))
+    if max_workers is not None:
+        workers = min(workers, max_workers)
     results = run_parallel(one, len(tasks), workers)
     samples = []
     for i in range(len(angle_rows)):

@@ -39,6 +39,7 @@ if HAS_AER:
         amplitude_damping_error,
         coherent_unitary_error,
         depolarizing_error,
+        kraus_error,
         pauli_error,
         phase_amplitude_damping_error,
         phase_damping_error,
@@ -46,7 +47,7 @@ if HAS_AER:
         thermal_relaxation_error,
     )
 
-    from qiskit_maestro.noise import decompose
+    from qiskit_maestro.noise import decompose, error_ptm
 
 try:
     from qiskit_ibm_runtime.fake_provider import FakeSherbrooke
@@ -119,26 +120,26 @@ def _ptm(error) -> np.ndarray:
 # ---- The channel decomposition ------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "build",
-    [
-        lambda: depolarizing_error(0.1, 1),
-        lambda: depolarizing_error(0.1, 2),
-        lambda: pauli_error([("XZ", 0.1), ("YI", 0.05), ("II", 0.85)]),
-        lambda: phase_damping_error(0.3),
-        lambda: amplitude_damping_error(0.3),
-        lambda: phase_amplitude_damping_error(0.2, 0.1),
-        lambda: reset_error(0.1, 0.05),
-        lambda: thermal_relaxation_error(50e-6, 30e-6, 3e-6),
-        lambda: thermal_relaxation_error(50e-6, 95e-6, 3e-6),
-        lambda: thermal_relaxation_error(50e-6, 70e-6, 3e-6, 0.1),
-        lambda: depolarizing_error(0.05, 1).compose(thermal_relaxation_error(5e-5, 8e-5, 3e-6)),
-        lambda: thermal_relaxation_error(5e-5, 8e-5, 3e-6).compose(depolarizing_error(0.05, 1)),
-        lambda: depolarizing_error(0.05, 2).compose(
-            thermal_relaxation_error(5e-5, 8e-5, 3e-6).expand(amplitude_damping_error(0.1))
-        ),
-    ],
-)
+_STANDARD_ERRORS = [
+    lambda: depolarizing_error(0.1, 1),
+    lambda: depolarizing_error(0.1, 2),
+    lambda: pauli_error([("XZ", 0.1), ("YI", 0.05), ("II", 0.85)]),
+    lambda: phase_damping_error(0.3),
+    lambda: amplitude_damping_error(0.3),
+    lambda: phase_amplitude_damping_error(0.2, 0.1),
+    lambda: reset_error(0.1, 0.05),
+    lambda: thermal_relaxation_error(50e-6, 30e-6, 3e-6),
+    lambda: thermal_relaxation_error(50e-6, 95e-6, 3e-6),
+    lambda: thermal_relaxation_error(50e-6, 70e-6, 3e-6, 0.1),
+    lambda: depolarizing_error(0.05, 1).compose(thermal_relaxation_error(5e-5, 8e-5, 3e-6)),
+    lambda: thermal_relaxation_error(5e-5, 8e-5, 3e-6).compose(depolarizing_error(0.05, 1)),
+    lambda: depolarizing_error(0.05, 2).compose(
+        thermal_relaxation_error(5e-5, 8e-5, 3e-6).expand(amplitude_damping_error(0.1))
+    ),
+]
+
+
+@pytest.mark.parametrize("build", _STANDARD_ERRORS)
 def test_standard_errors_decompose_exactly(build):
     error = build()
     channel = decompose(_ptm(error), (0.0,) * error.num_qubits)
@@ -163,6 +164,35 @@ def test_coherent_errors_dont_decompose():
 
     error = coherent_unitary_error(RXGate(0.1).to_matrix())
     assert "coherent" in decompose(_ptm(error), (0.0,))
+
+
+def _unusual_errors():
+    """Errors whose instructions have no Pauli structure, or act on reversed qubits."""
+    from qiskit.circuit.library import CXGate, ECRGate, RXGate, RZZGate
+
+    swapped = QuantumCircuit(2)
+    swapped.cx(1, 0)
+    swapped.append(RXGate(0.3), [1])
+    flip = np.kron(np.diag([1, -1]), np.array([[0, 1], [1, 0]]))
+    return [
+        coherent_unitary_error(RXGate(0.1).to_matrix()),
+        coherent_unitary_error(ECRGate().to_matrix()),
+        QuantumError([(CXGate(), 0.3), (RZZGate(0.2), 0.7)]),
+        QuantumError([(swapped, 0.4), (QuantumCircuit(2), 0.6)]),
+        kraus_error([np.sqrt(0.8) * np.eye(4), np.sqrt(0.2) * flip]),
+        thermal_relaxation_error(5e-5, 8e-5, 3e-6).expand(reset_error(0.2, 0.1)),
+    ]
+
+
+def test_pauli_transfer_matrices_match_qiskit():
+    """The plugin's own PTM computation agrees with Qiskit's for every kind of error."""
+    errors = [build() for build in _STANDARD_ERRORS] + _unusual_errors()
+    model = NoiseModel.from_backend(GenericBackendV2(4, seed=11))
+    errors += [
+        error for by_qubits in model._local_quantum_errors.values() for error in by_qubits.values()
+    ]
+    for error in errors:
+        np.testing.assert_allclose(error_ptm(error), _ptm(error), atol=1e-12)
 
 
 # ---- Exact agreement on the density matrix ------------------------------------------
@@ -261,6 +291,53 @@ def test_seeded_noisy_runs_repeat():
         for _ in range(2)
     ]
     assert runs[0].get_counts() == runs[1].get_counts()
+
+
+@pytest.mark.parametrize("shots", [5, 200, 3000])
+def test_seeded_noisy_runs_dont_depend_on_the_thread_count(shots):
+    model = _strong_noise_model()
+    circuits = [_circuit(measure=True), _circuit(measure=True).reverse_bits()]
+    counts = [
+        MaestroBackend(noise_model=model, seed_simulator=9, max_parallel_experiments=workers)
+        .run(circuits, shots=shots)
+        .result()
+        .get_counts()
+        for workers in (1, 3, 0)
+    ]
+    assert counts[0] == counts[1] == counts[2]
+
+
+def test_noisy_shots_split_by_the_shot_count_alone():
+    from qiskit_maestro._execution import noisy_chunks
+
+    for shots in (1, 15, 16, 33, 200, 1024, 4097, 10**6):
+        chunks = noisy_chunks(shots)
+        assert sum(chunks) == shots
+        assert 1 <= len(chunks) <= 64
+        assert max(chunks) - min(chunks) <= 1
+        assert len(chunks) == 1 or min(chunks) >= 16
+
+
+def test_noisy_parameter_sets_keep_their_own_angles():
+    """Parameter sets split into tasks that share each set's circuit, never another's."""
+    from qiskit.circuit import Parameter
+    from qiskit_aer.primitives import SamplerV2 as AerSampler
+
+    theta = Parameter("theta")
+    circuit = QuantumCircuit(2)
+    circuit.rx(theta, 0)
+    circuit.cx(0, 1)
+    circuit.measure_all()
+    model = NoiseModel()
+    model.add_all_qubit_quantum_error(depolarizing_error(0.1, 2), ["cx"])
+    values = [[0.0], [np.pi], [np.pi / 2], [2.0]]
+    options = {"backend_options": {"noise_model": model}}
+    mine = MaestroSampler(seed=1, options=options).run([(circuit, values)], shots=4000).result()
+    aer = AerSampler(seed=2, options=options).run([(circuit, values)], shots=4000).result()
+    for k in range(len(values)):
+        assert_same_distribution(
+            mine[0].data.meas[k].get_counts(), aer[0].data.meas[k].get_counts()
+        )
 
 
 # ---- Where Aer attaches noise -------------------------------------------------------

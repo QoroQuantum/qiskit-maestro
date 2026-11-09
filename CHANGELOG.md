@@ -30,7 +30,14 @@
   and the density matrix for small noisy ones, by Aer's rule.
 - `for_loop` is unrolled, and `switch` becomes one `if` block per case value.
   Both are in the backend's target, so `transpile` keeps them.
-- Noisy sampling on pure-state methods runs its shots in parallel, 1,024 per task.
+- Noisy sampling on pure-state methods runs its shots in parallel: up to 64 tasks
+  of at least 16 shots each, so that a few hundred shots already use every core.
+  The split depends on the shot count only, so seeded results don't depend on
+  the CPU count. With a device's depolarizing and readout errors, sampling is
+  as fast as Aer's at 8 and 10 qubits and twice as fast at 12.
+- Noise models translate about 13 times faster: the plugin computes each
+  error's Pauli transfer matrix from its instructions, instead of through
+  Qiskit's `SuperOp`, and falls back to Qiskit for instructions it doesn't know.
 
 ## [0.1.0]
 

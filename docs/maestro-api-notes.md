@@ -188,11 +188,23 @@ today; none of these are hidden from users.
     Workaround: noisy circuits drop the qubits no operation touches, as Aer's
     truncation does, and observables are remapped (X or Y on a dropped qubit
     gives 0). Ask: drop untouched qubits before simulating.
-13. **`noisy_execute` runs realizations one after another.** With one
-    realization per shot, as sampled noise needs, 20,000 shots of a small
-    circuit took 1.9 s. Workaround: the plugin splits the shots into tasks
-    of 1,024 with derived seeds and runs them on threads (0.8 s on 12 cores).
-    Ask: run realizations in parallel inside `noisy_execute`.
+13. **`noisy_execute` runs realizations one after another, partly under the
+    GIL.** In 0.3.10 (and 0.3.13), `execute_noise_batches` loops over the
+    realizations in one thread. Each one injects noise (cloning every
+    operation) and builds a Python dict of counts with the GIL held, and
+    releases it only inside `SampleCircuit`, which also redoes cone analysis
+    and simulator setup per realization (0.08–0.13 ms fixed cost at 8–13
+    qubits). One realization per shot, as sampled noise needs, so 200 shots of
+    a 10-qubit device circuit took 93 ms in one call, against Aer's 30 ms on
+    12 threads, although one realization (0.46 ms) is cheaper than an Aer shot
+    on one thread (0.6 ms). Workaround: the plugin splits the shots into up to
+    64 tasks of at least 16 shots, with derived seeds, and runs them on
+    threads (26 ms). The GIL-held part still caps the speedup: 20,000 shots
+    stop improving at 8 threads (1.8 s, 4–6 times one thread; the fitted
+    serial part is 26–56 µs per shot). Core `main` (unreleased) runs
+    realizations on workers with the GIL released (`ExecuteNoisy`); once that
+    is released, the plugin should hand each parameter set's shots to one
+    call instead.
 14. **`get_statevector` needs a statevector or MPS.** The stabilizer and
     tensor-network methods raise ("Invalid simulation type for obtaining the
     amplitude"). The plugin rejects `save_statevector` on them.

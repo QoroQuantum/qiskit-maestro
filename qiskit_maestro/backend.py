@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import inspect
+import sys
 import time
 import uuid
 import warnings
@@ -209,23 +210,26 @@ class MaestroBackend(BackendV2):
         seed = options["seed_simulator"]
         rng = np.random.default_rng(seed)
         seeds = _execution.maestro_seeds(rng, seed is not None, len(circuits))
+        widest = max((c.num_qubits for c, _ in prepared), default=0)
+        workers = parallel_workers(options, widest, len(circuits))
+        # Noisy circuits split their shots over threads too; share the threads out.
+        inner_workers = max(1, parallel_workers(options, widest, sys.maxsize) // workers)
 
         def one(i: int) -> tuple[_execution.Samples | None, tuple | None]:
             circuit, circuit_options = prepared[i]
             samples = saved = None
             if circuit.has_measurements:
                 rows = circuit.angle_rows()
-                samples = _execution.sample(circuit, rows, shots, circuit_options, [seeds[i]])[0]
+                samples = _execution.sample(
+                    circuit, rows, shots, circuit_options, [seeds[i]], inner_workers
+                )[0]
             if circuit.saves:
                 row = circuit.angle_rows()[0]
                 saved = _execution.saved_data(circuit, row, circuit_options, seeds[i], shots)
             return samples, saved
 
         start = time.perf_counter()
-        widest = max((c.num_qubits for c, _ in prepared), default=0)
-        outputs = _execution.run_parallel(
-            one, len(circuits), parallel_workers(options, widest, len(circuits))
-        )
+        outputs = _execution.run_parallel(one, len(circuits), workers)
         experiments = [
             _experiment(circuit, samples, saved, shots, memory, rng, prepared[i][1], seeds[i])
             for i, (circuit, (samples, saved)) in enumerate(zip(circuits, outputs))
