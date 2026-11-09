@@ -30,6 +30,7 @@ instruction and qubits. No noise is dropped.
 from __future__ import annotations
 
 import math
+import weakref
 from dataclasses import dataclass
 from functools import cache, reduce
 
@@ -390,15 +391,14 @@ class NoiseTranslator:
                 "places noise channels on one or two.",
                 qubits,
             )
-        ptm = np.asarray(error_ptm(error), dtype=complex)
-        if np.max(np.abs(ptm.imag)) > _TOLERANCE:
-            raise UnsupportedNoiseError(name, "its noise isn't a valid channel.", qubits)
         excited = tuple(self.excited_population(q) if family == "exact" else 0.0 for q in qubits)
-        result = decompose(ptm.real, excited)
+        result = _decomposition(error, excited)
+        if result is None:
+            raise UnsupportedNoiseError(name, "its noise isn't a valid channel.", qubits)
         if isinstance(result, str):
             hint = ""
             thermal = tuple(self.excited_population(q) for q in qubits)
-            if family == "sampled" and not isinstance(decompose(ptm.real, thermal), str):
+            if family == "sampled" and isinstance(_decomposition(error, thermal), Channel):
                 hint = (
                     " It relaxes towards an excited-state population, which Maestro applies "
                     "exactly only with method='density_matrix'."
@@ -433,6 +433,45 @@ class NoiseTranslator:
                 "correlated readout errors on several qubits aren't supported; Maestro "
                 "applies readout error to each measured qubit independently.",
             )
+
+
+# Each Aer error's translations, kept while the error exists. A noise model hands
+# out the same error objects run after run, and Aer never changes one in place:
+# adding to a model composes a new error. Keyed by id(), because QuantumError
+# isn't hashable; the weak reference confirms the id still names that error.
+_TRANSLATIONS: dict[int, tuple[weakref.ref, dict]] = {}
+
+
+def _translations(error) -> dict:
+    """The translation cache of ``error``, or an uncached dict if it can't be tracked."""
+    key = id(error)
+    entry = _TRANSLATIONS.get(key)
+    if entry is not None and entry[0]() is error:
+        return entry[1]
+
+    def forget(ref, key=key) -> None:
+        if _TRANSLATIONS.get(key, (None,))[0] is ref:
+            del _TRANSLATIONS[key]
+
+    cache: dict = {}
+    try:
+        _TRANSLATIONS[key] = (weakref.ref(error, forget), cache)
+    except TypeError:
+        pass
+    return cache
+
+
+def _decomposition(error, excited: tuple[float, ...]) -> Channel | str | None:
+    """:func:`decompose` of ``error``'s PTM, cached; ``None`` if it isn't a real channel."""
+    cache = _translations(error)
+    if excited in cache:
+        return cache[excited]
+    if "ptm" not in cache:
+        ptm = np.asarray(error_ptm(error), dtype=complex)
+        cache["ptm"] = None if np.max(np.abs(ptm.imag)) > _TOLERANCE else ptm.real
+    ptm = cache["ptm"]
+    result = cache[excited] = None if ptm is None else decompose(ptm, excited)
+    return result
 
 
 def maestro_noise_model(

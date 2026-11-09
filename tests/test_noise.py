@@ -195,6 +195,39 @@ def test_pauli_transfer_matrices_match_qiskit():
         np.testing.assert_allclose(error_ptm(error), _ptm(error), atol=1e-12)
 
 
+def test_translations_are_reused_across_runs_and_follow_model_changes():
+    import gc
+
+    from qiskit.circuit.library import XGate
+
+    from qiskit_maestro.noise import _TRANSLATIONS, NoiseTranslator, _decomposition
+
+    model = NoiseModel()
+    model.add_all_qubit_quantum_error(depolarizing_error(0.1, 1), ["x"])
+
+    def channel():
+        translator = NoiseTranslator(model)  # One per run, as the backend makes them.
+        _, after = translator.errors(XGate(), (0,), top_level=True)
+        return translator.channel(after[0], "sampled")
+
+    first = channel()
+    assert channel() is first
+    # Adding to a model composes a new error object, which gets its own translation.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.add_all_qubit_quantum_error(pauli_error([("Z", 0.2), ("I", 0.8)]), ["x"])
+    composed = model._default_quantum_errors["x"]
+    assert channel() == decompose(_ptm(composed), (0.0,)) != first
+    # A translation is dropped with its error.
+    error = depolarizing_error(0.3, 1)
+    key = id(error)
+    _decomposition(error, (0.0,))
+    assert key in _TRANSLATIONS
+    del error
+    gc.collect()
+    assert key not in _TRANSLATIONS
+
+
 # ---- Exact agreement on the density matrix ------------------------------------------
 
 

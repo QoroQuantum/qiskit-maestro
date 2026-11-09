@@ -77,9 +77,17 @@ def maestro_samples_to_outcomes(samples, num_clbits: int) -> tuple[np.ndarray, n
         raise ValueError(
             f"Maestro returned {rows.shape[1]}-bit outcomes for a circuit with {num_clbits} clbits."
         )
-    padded = np.zeros((len(rows), num_clbits), dtype=np.uint8)
     width = min(rows.shape[1], num_clbits)
-    padded[:, :width] = rows[:, :width]
+    rows = rows[:, :width]
+    if width <= 62:
+        # Count each row as an integer, much faster than np.unique on rows.
+        weights = np.left_shift(np.int64(1), np.arange(width, dtype=np.int64))
+        values, frequencies = np.unique(rows.astype(np.int64) @ weights, return_counts=True)
+        outcomes = np.zeros((len(values), num_clbits), dtype=np.uint8)
+        outcomes[:, :width] = (values[:, None] >> np.arange(width)) & 1
+        return outcomes, frequencies.astype(np.int64)
+    padded = np.zeros((len(rows), num_clbits), dtype=np.uint8)
+    padded[:, :width] = rows
     outcomes, frequencies = np.unique(padded, axis=0, return_counts=True)
     return outcomes, frequencies.astype(np.int64)
 

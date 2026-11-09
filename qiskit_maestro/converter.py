@@ -421,7 +421,18 @@ def _remap(op: _Op, index: dict[int, int]) -> _Op:
             if op.false_body is None
             else tuple(_remap(o, index) for o in op.false_body),
         )
-    return dataclasses.replace(op, qubits=tuple(index[q] for q in op.qubits))
+    # The constructor, as dataclasses.replace is several times slower on large circuits.
+    return _Op(
+        kind=op.kind,
+        qubits=tuple(index[q] for q in op.qubits),
+        angles=op.angles,
+        clbits=op.clbits,
+        condition=op.condition,
+        true_body=op.true_body,
+        false_body=op.false_body,
+        probabilities=op.probabilities,
+        noise=op.noise,
+    )
 
 
 def _walk(ops):
@@ -493,7 +504,7 @@ class _Converter:
         self.noise = noise
         self.allow_saves = saves
         # Unrolling binds loop variables, which Qiskit 1.x lists among the parameters.
-        loop_variables = _loop_variables(circuit)
+        loop_variables = _loop_variables(circuit) if circuit.parameters else set()
         self.result = ConvertedCircuit(
             num_qubits=circuit.num_qubits,
             num_clbits=circuit.num_clbits,

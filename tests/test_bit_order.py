@@ -19,6 +19,7 @@ from qiskit.quantum_info import SparsePauliOp
 from qiskit_maestro import MaestroBackend, MaestroEstimator, MaestroSampler
 from qiskit_maestro.bit_order import (
     maestro_counts_to_outcomes,
+    maestro_samples_to_outcomes,
     outcomes_to_bitstrings,
     outcomes_to_hex,
     pack_register,
@@ -50,6 +51,30 @@ def test_counts_to_outcomes_pads_unwritten_clbits():
 def test_counts_to_outcomes_rejects_outcomes_wider_than_the_circuit():
     with pytest.raises(ValueError):
         maestro_counts_to_outcomes({"0001": 1}, 2)
+
+
+@pytest.mark.parametrize("width,num_clbits", [(3, 3), (2, 5), (62, 62), (63, 63), (70, 72)])
+def test_samples_to_outcomes_counts_rows_like_counts(width, num_clbits):
+    # Maestro's rows have clbit 0 in column 0 and stop at the highest clbit written.
+    rows = np.random.default_rng(width).integers(0, 2, size=(400, width), dtype=np.uint8)
+    rows[:5] = rows[0]
+    counts: dict[str, int] = {}
+    for row in rows:
+        key = "".join(map(str, row))
+        counts[key] = counts.get(key, 0) + 1
+    outcomes, frequencies = maestro_samples_to_outcomes(rows, num_clbits)
+    expected_outcomes, expected_frequencies = maestro_counts_to_outcomes(counts, num_clbits)
+    assert outcomes.dtype == np.uint8
+    assert frequencies.dtype == np.int64
+    assert outcomes.shape == (len(counts), num_clbits)
+    assert dict(zip(map(bytes, outcomes), frequencies.tolist())) == dict(
+        zip(map(bytes, expected_outcomes), expected_frequencies.tolist())
+    )
+
+
+def test_samples_to_outcomes_rejects_rows_wider_than_the_circuit():
+    with pytest.raises(ValueError):
+        maestro_samples_to_outcomes(np.array([[0, 0, 1]], dtype=np.uint8), 2)
 
 
 def test_qiskit_strings_put_clbit_zero_on_the_right():
