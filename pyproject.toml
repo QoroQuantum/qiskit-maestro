@@ -28,7 +28,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-    "qiskit>=1.1",
+    "qiskit>=1.1,<3",
     "qoro-maestro>=0.3.14",
     "numpy>=1.23",
 ]

@@ -18,7 +18,7 @@ Submitted via [Issue #1449](https://github.com/Qiskit/ecosystem/issues/1449) and
 | Criterion | Evidence |
 |---|---|
 | Builds on, interfaces with, or extends Qiskit | `MaestroBackend` is a `BackendV2` with a `Target`; `MaestroSampler` and `MaestroEstimator` implement `BaseSamplerV2` and `BaseEstimatorV2`. |
-| Compatible with Qiskit 2.0 or newer | CI tests the latest Qiskit 2.x and 1.x on Python 3.10 to 3.13, and the oldest supported version, 1.1. `pyproject.toml` declares `qiskit>=1.1`. |
+| Compatible with Qiskit 2.0 or newer | CI tests the latest Qiskit 2.x and 1.x on Python 3.10 to 3.13, and the oldest supported version, 1.1. `pyproject.toml` declares `qiskit>=1.1,<3`. |
 | OSI-approved licence | GPL-3.0-or-later, with SPDX headers in every source file. |
 | Follows Qiskit's Code of Conduct | `CODE_OF_CONDUCT.md` is the Contributor Covenant 2.1, which Qiskit's code of conduct is also based on. Contributors also follow Qiskit's. |
 | Maintainer activity within six months | First release in November 2026, with Maestro itself released regularly (0.3.10 in October 2026). |
