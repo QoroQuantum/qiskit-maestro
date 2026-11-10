@@ -26,6 +26,7 @@ __all__ = [
     "outcomes_to_hex",
     "pack_register",
     "pauli_label_to_maestro",
+    "qiskit_counts_to_outcomes",
 ]
 
 
@@ -62,6 +63,18 @@ def maestro_counts_to_outcomes(
         outcomes[row, :width] = np.frombuffer(bits[:width].encode(), dtype=np.uint8) - ord("0")
         frequencies[row] = count
     return outcomes, frequencies
+
+
+def qiskit_counts_to_outcomes(
+    counts: Mapping[str, int], num_clbits: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Turn counts keyed by Qiskit-order bitstrings (clbit 0 rightmost) into outcome rows.
+
+    The Qoro cloud keys its counts this way. Keys shorter than ``num_clbits``
+    are missing their high clbits, which are zero. The result has the form of
+    :func:`maestro_counts_to_outcomes`'s.
+    """
+    return maestro_counts_to_outcomes({bits[::-1]: n for bits, n in counts.items()}, num_clbits)
 
 
 def maestro_samples_to_outcomes(samples, num_clbits: int) -> tuple[np.ndarray, np.ndarray]:

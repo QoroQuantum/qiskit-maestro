@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Run on the Qoro cloud: `service=QoroService()` (from Divi, installed with
+  `pip install "qiskit-maestro[cloud]"`) on `MaestroBackend`, `MaestroSampler`
+  and `MaestroEstimator`. Each `run()` submits one cloud job and returns a
+  `QoroCloudJob` (backend) or `QoroCloudPrimitiveJob` (primitives) carrying the
+  cloud's job ID, with `status()`, `cancel()`, and `result()` that waits. The
+  estimator uses the cloud's expectation-value jobs, so its values are exact.
+  Circuits are converted and checked locally, then sent as OpenQASM 2.0 with
+  the simulator options as a Maestro config; results come back in the same
+  form and bit order as local runs. Failed jobs, cloud timeouts and running out
+  of credits raise the new `QoroCloudError`. `device="GPU"` runs on the
+  `qoro_gpu` cluster. Parameter sweeps go as one template per circuit with a
+  table of parameter values, bound by the cloud, when the job's circuits share
+  their shots or observables. Noise models, classical control,
+  save instructions, estimator resets and `run_evolution` raise a clear error
+  on the cloud for now. `from_backend` carries the service over.
 - Aer noise models: `noise_model=` on `MaestroBackend` (constructor, `set_options`
   or `run`), `MaestroSampler` and `MaestroEstimator`, including through Aer's
   `options={"backend_options": {...}}`. Each error acts where Aer applies it,

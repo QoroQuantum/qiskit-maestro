@@ -5,16 +5,19 @@
 
 Swap ``AerSimulator`` for :class:`MaestroBackend`, ``StatevectorSampler`` for
 :class:`MaestroSampler`, and ``StatevectorEstimator`` for
-:class:`MaestroEstimator`.
+:class:`MaestroEstimator`. Pass ``service=QoroService()`` (from qoro-divi) to
+the backend or the sampler to run on Maestro in the Qoro cloud.
 """
 
 from importlib.metadata import PackageNotFoundError, version
 
 from .backend import MaestroBackend, MaestroJob
+from .cloud import QoroCloudJob, QoroCloudPrimitiveJob
 from .estimator import MaestroEstimator
 from .exceptions import (
     MaestroError,
     MaestroGpuError,
+    QoroCloudError,
     UnsupportedInstructionError,
     UnsupportedNoiseError,
 )
@@ -32,6 +35,9 @@ __all__ = [
     "MaestroGpuError",
     "MaestroJob",
     "MaestroSampler",
+    "QoroCloudError",
+    "QoroCloudJob",
+    "QoroCloudPrimitiveJob",
     "UnsupportedInstructionError",
     "UnsupportedNoiseError",
     "__version__",

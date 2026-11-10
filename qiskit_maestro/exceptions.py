@@ -34,6 +34,17 @@ class UnsupportedNoiseError(UnsupportedInstructionError):
         super().__init__(instruction, reason)
 
 
+class QoroCloudError(MaestroError):
+    """A run can't be sent to the Qoro cloud, or the cloud job didn't succeed.
+
+    ``job_id`` is the cloud job's identifier when the job was submitted.
+    """
+
+    def __init__(self, message: str, job_id: str | None = None):
+        self.job_id = job_id
+        super().__init__(message)
+
+
 class MaestroGpuError(MaestroError):
     """``device="GPU"`` was requested but Maestro's GPU backend can't be used."""
 

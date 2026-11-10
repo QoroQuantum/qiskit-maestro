@@ -20,9 +20,10 @@ from qiskit.providers import BackendV2, JobStatus, JobV1, Options
 from qiskit.result import Result
 from qiskit.transpiler import Target
 
-from . import _execution
+from . import _execution, cloud
 from .bit_order import outcomes_to_hex
 from .converter import NATIVE_GATES, ConvertedCircuit, convert
+from .exceptions import UnsupportedInstructionError
 from .noise import NoiseTranslator
 from .options import (
     DEFAULT_OPTIONS,
@@ -136,9 +137,14 @@ class MaestroBackend(BackendV2):
         shots: Default shots for :meth:`run` (1024).
         memory: Whether :meth:`run` returns per-shot results by default
             (``False``).
+        service: A ``divi.backends.QoroService`` to run on the Qoro cloud.
+            :meth:`run` then submits one cloud job and returns a
+            :class:`~qiskit_maestro.cloud.QoroCloudJob` at once. ``None``
+            (default) runs locally. On the cloud, circuits can't have classical
+            control, save instructions or a noise model yet.
     """
 
-    def __init__(self, *, name: str = "maestro_simulator", **options):
+    def __init__(self, *, name: str = "maestro_simulator", service=None, **options):
         from . import __version__
 
         super().__init__(
@@ -146,6 +152,9 @@ class MaestroBackend(BackendV2):
             description="Maestro quantum circuit simulator by Qoro Quantum",
             backend_version=__version__,
         )
+        if service is not None:
+            cloud.check_service(service)
+        self._service = service
         self._target = maestro_target()
         self.set_options(**options)
 
@@ -158,13 +167,20 @@ class MaestroBackend(BackendV2):
         return self._target
 
     @property
+    def service(self):
+        """The ``QoroService`` the backend runs on, or ``None`` when it runs locally."""
+        return self._service
+
+    @property
     def max_circuits(self) -> None:
         return None
 
     def set_options(self, **fields):
         run_only = {k: fields.pop(k) for k in list(fields) if k in _RUN_DEFAULTS}
         given = normalize_options(fields)
-        resolve_options(self.simulator_options(), given)
+        merged = resolve_options(self.simulator_options(), given, local=self._service is None)
+        if self._service is not None:
+            cloud.check_options(merged)
         super().set_options(**run_only, **given)
         if "noise_model" in given:
             model = given["noise_model"]
@@ -176,8 +192,8 @@ class MaestroBackend(BackendV2):
 
     def run(
         self, run_input: QuantumCircuit | Sequence[QuantumCircuit], **run_options
-    ) -> MaestroJob:
-        """Sample circuits and return a finished job.
+    ) -> MaestroJob | cloud.QoroCloudJob:
+        """Sample circuits and return a finished job, or a submitted one on the Qoro cloud.
 
         Args:
             run_input: A circuit or a list of circuits, with every parameter bound.
@@ -190,6 +206,7 @@ class MaestroBackend(BackendV2):
             UnsupportedNoiseError: if the noise model has an error, on an
                 instruction a circuit uses, that Maestro can't reproduce exactly.
             MaestroGpuError: if ``device="GPU"`` and the GPU can't be used.
+            QoroCloudError: with a ``service``, for an option the cloud can't honour.
         """
         circuits = [run_input] if isinstance(run_input, QuantumCircuit) else list(run_input)
         shots = run_options.pop("shots", self.options.shots)
@@ -197,10 +214,14 @@ class MaestroBackend(BackendV2):
         for unused in [name for name in run_options if name not in OPTION_NAMES]:
             warnings.warn(f"Option {unused!r} isn't used by {self.name}.", stacklevel=2)
             del run_options[unused]
-        options = resolve_options(self.simulator_options(), run_options)
+        options = resolve_options(
+            self.simulator_options(), run_options, local=self._service is None
+        )
         if isinstance(shots, bool) or not isinstance(shots, (int, np.integer)) or shots < 1:
             raise ValueError(f"shots must be a positive integer, got {shots!r}.")
         shots = int(shots)
+        if self._service is not None:
+            return self._run_cloud(circuits, options, shots, memory)
 
         translator = (
             None if options["noise_model"] is None else NoiseTranslator(options["noise_model"])
@@ -240,7 +261,12 @@ class MaestroBackend(BackendV2):
             for i, (circuit, (samples, saved)) in enumerate(zip(circuits, outputs))
         ]
         job_id = str(uuid.uuid4())
-        result = Result.from_dict(
+        return MaestroJob(
+            self, job_id, self._result(job_id, experiments, time.perf_counter() - start)
+        )
+
+    def _result(self, job_id: str, experiments: list[dict], time_taken: float) -> Result:
+        return Result.from_dict(
             {
                 "backend_name": self.name,
                 "backend_version": self.backend_version,
@@ -248,10 +274,53 @@ class MaestroBackend(BackendV2):
                 "job_id": job_id,
                 "success": True,
                 "results": experiments,
-                "time_taken": time.perf_counter() - start,
+                "time_taken": time_taken,
             }
         )
-        return MaestroJob(self, job_id, result)
+
+    def _run_cloud(
+        self,
+        circuits: list[QuantumCircuit],
+        options: dict[str, Any],
+        shots: int,
+        memory: bool,
+    ) -> cloud.QoroCloudJob:
+        """Submit the circuits with measurements to the Qoro cloud as one job."""
+        cloud.check_options(options)
+        prepared = [_prepare(circuit, options, shots, None) for circuit in circuits]
+        programs = []
+        for i, (converted, _) in enumerate(prepared):
+            if converted.saves:
+                raise UnsupportedInstructionError(
+                    converted.saves[0].kind,
+                    "save instructions can't run on the Qoro cloud yet, which returns "
+                    "counts only. Run the circuit locally instead.",
+                )
+            if converted.has_measurements:
+                programs.append(
+                    cloud.Program(converted, converted.angle_rows(), [str(i)], shots=[shots])
+                )
+        # Without noise, every circuit resolves to the same method.
+        config = cloud.maestro_config(prepared[0][1] if prepared else options)
+        run = cloud.CloudRun(self._service, programs, config, gpu=options["device"] == "GPU")
+        seed = options["seed_simulator"]
+
+        def build(results) -> Result:
+            rng = np.random.default_rng(seed)
+            experiments = []
+            for i, (circuit, (converted, circuit_options)) in enumerate(zip(circuits, prepared)):
+                samples = (
+                    cloud.to_samples(results[str(i)], converted.num_clbits, circuit_options)
+                    if converted.has_measurements
+                    else None
+                )
+                experiments.append(
+                    _experiment(circuit, samples, None, shots, memory, rng, circuit_options, seed)
+                )
+            time_taken = sum(e["time_taken"] for e in experiments)
+            return self._result(run.job_id, experiments, time_taken)
+
+        return cloud.QoroCloudJob(self, run, build)
 
 
 def _prepare(
@@ -297,13 +366,15 @@ def _experiment(
         data["counts"] = dict(zip(outcomes_to_hex(samples.outcomes), samples.frequencies.tolist()))
         if memory:
             data["memory"] = outcomes_to_hex(samples.shots(rng))
-        metadata["maestro"] = run_info([samples.info])
+        if info := run_info([samples.info]):
+            metadata["maestro"] = info
         time_taken = samples.info.get("time_taken", 0.0)
     if saved is not None:
         data.update(saved[0])
         if saved[1]:
             infos = saved[1] + ([samples.info] if samples is not None else [])
-            metadata["maestro"] = run_info(infos)
+            if info := run_info(infos):
+                metadata["maestro"] = info
     return {
         "shots": shots,
         "success": True,

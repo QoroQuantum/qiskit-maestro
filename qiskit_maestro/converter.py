@@ -12,6 +12,7 @@ Gates outside Maestro's native set are expanded through their Qiskit
 definitions. ``for_loop`` is unrolled and ``switch`` becomes a chain of ``if``
 blocks. Circuits with classical control are written out as OpenQASM 3,
 because Maestro accepts classical control only through its QASM parser.
+Circuits sent to the Qoro cloud are written as OpenQASM 2.0, which it takes.
 
 With an Aer noise model, each instruction's errors become placeholder ``noise``
 operations where Aer applies them. :meth:`ConvertedCircuit.with_noise` replaces
@@ -280,6 +281,38 @@ class ConvertedCircuit:
         lines.extend(_qasm(op, angles) for op in self.ops)
         return "\n".join(lines) + "\n"
 
+    def to_qasm2(self, angles: np.ndarray) -> str:
+        """Write one row of :meth:`angle_rows` as OpenQASM 2.0, the form the Qoro cloud takes.
+
+        Raises:
+            UnsupportedInstructionError: for classical control, which OpenQASM 2
+                can express only as a test of a whole register.
+        """
+        return self._qasm2(lambda slot: repr(float(angles[slot.index])))
+
+    def qasm2_template(self) -> tuple[str, list[int]]:
+        """OpenQASM 2.0 with each symbolic angle left as a named parameter.
+
+        The parameter for column ``j`` of :meth:`angle_rows` is ``angle_j``.
+        Returns the template and the columns it uses, in the order its
+        parameters are listed.
+
+        Raises:
+            UnsupportedInstructionError: as :meth:`to_qasm2` does.
+        """
+        columns = sorted(
+            {a.index for op in _walk(self.ops) for a in op.angles if isinstance(a, _Slot)}
+        )
+        return self._qasm2(lambda slot: f"{QASM2_PARAMETER_PREFIX}{slot.index}"), columns
+
+    def _qasm2(self, slot_text) -> str:
+        lines = ["OPENQASM 2.0;", 'include "qelib1.inc";', f"qreg q[{max(self.num_qubits, 1)}];"]
+        if self.num_clbits:
+            lines.append(f"creg c[{self.num_clbits}];")
+        for op in self.ops:
+            lines.extend(_qasm2(op, slot_text))
+        return "\n".join(lines) + "\n"
+
     def to_maestro_qasm(self, angles: np.ndarray) -> MaestroCircuit:
         """Parse :meth:`to_qasm` output, naming the construct Maestro rejected."""
         parser = maestro.QasmToCirc()
@@ -495,6 +528,46 @@ def _qasm(op: _Op, row: np.ndarray) -> str:
         return f"{op.kind} {qubits};"
     angles = ", ".join(repr(a) for a in _angles(op, row))
     return f"{op.kind}({angles}) {qubits};"
+
+
+# Native gates whose OpenQASM 2 (qelib1) names differ from Maestro's method names.
+_QASM2_NAMES = {"p": "u1", "cp": "cu1", "u": "u3"}
+
+# The name of the template parameter for column j of the angle rows is this plus j.
+QASM2_PARAMETER_PREFIX = "angle_"
+
+
+def _qasm2(op: _Op, slot_text) -> list[str]:
+    """OpenQASM 2.0 statements for one op, using only the gates the Qoro cloud accepts.
+
+    ``slot_text`` writes a symbolic angle: its value, or a template parameter.
+    """
+    if op.kind == "measure":
+        return [f"measure q[{op.qubits[0]}] -> c[{op.clbits[0]}];"]
+    if op.kind == "reset":
+        return [f"reset q[{op.qubits[0]}];"]
+    if op.kind == "if":
+        raise UnsupportedInstructionError(
+            "if_else",
+            "classical control can't be sent to the Qoro cloud yet. It takes OpenQASM 2, "
+            "which can only test a whole register. Run the circuit locally instead.",
+        )
+    if op.kind in ("noise", "pauli_channel", "delay"):
+        raise RuntimeError("Noise operations can't be written as OpenQASM.")
+    angles = [slot_text(a) if isinstance(a, _Slot) else repr(float(a)) for a in op.angles]
+    qubits = [f"q[{q}]" for q in op.qubits]
+    if op.kind == "csx":
+        # Controlled H S H, and H S H is SX exactly.
+        control, target = qubits
+        return [f"h {target};", f"cu1({math.pi / 2!r}) {control},{target};", f"h {target};"]
+    if op.kind == "cu":
+        # CU's fourth angle is a phase on the control's |1>; cu3 is CU without it.
+        control, target = qubits
+        theta, phi, lam, gamma = angles
+        return [f"u1({gamma}) {control};", f"cu3({theta},{phi},{lam}) {control},{target};"]
+    name = _QASM2_NAMES.get(op.kind, op.kind)
+    arguments = f"({','.join(angles)})" if angles else ""
+    return [f"{name}{arguments} {','.join(qubits)};"]
 
 
 class _Converter:

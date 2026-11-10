@@ -207,6 +207,48 @@ Maestro reads the licence key from `MAESTRO_LICENSE_KEY` itself. If no GPU is
 available or the licence isn't accepted, qiskit-maestro raises
 `MaestroGpuError`; it never falls back to the CPU silently.
 
+## Run on the Qoro cloud
+
+Pass a `QoroService` from [Divi](https://github.com/QoroQuantum/divi) as
+`service=` and the backend, sampler or estimator runs on Maestro in the Qoro
+cloud instead of on your machine:
+
+```bash
+pip install "qiskit-maestro[cloud]"
+```
+
+```python
+from divi.backends import QoroService
+from qiskit_maestro import MaestroBackend, MaestroEstimator, MaestroSampler
+
+service = QoroService()  # Reads QORO_API_KEY from a .env file or the environment.
+
+backend = MaestroBackend(service=service, method="mps")
+job = backend.run(circuits, shots=2000)
+print(job.job_id(), job.status())
+counts = job.result().get_counts()
+
+sampler = MaestroSampler(service=service)
+estimator = MaestroEstimator(service=service)
+```
+
+Each `run()` sends its circuits as one cloud job and returns at once.
+`job_id()` is the cloud's job ID, `status()` asks the cloud, `result()` waits
+(the backend's job takes a `timeout`, after which the job keeps running), and
+`cancel()` cancels it. The simulator options travel with the job, and results
+come back in the same form and bit order as local runs. The estimator sends
+expectation-value jobs, so its values are exact, as they are locally.
+`device="GPU"` runs the job on the Qoro GPU cluster; otherwise it runs on the
+service's cluster. A parameter sweep goes as one circuit template with a table
+of parameter values, which the cloud binds, when every circuit in the job takes
+the same shots (or, for the estimator, the same observables); otherwise each
+parameter set goes as its own circuit. A job that fails, times out on the cloud
+or runs out of credits raises `QoroCloudError`, with its `job_id`.
+
+Not available on the cloud yet, and raising a clear error instead: noise
+models, classical control (`if_test`, `switch`), Aer's save instructions,
+resets in estimator circuits, and `run_evolution`.
+
 ## Bit order
 
 Maestro puts qubit 0 on the left of bitstrings and Pauli strings; Qiskit puts it

@@ -14,10 +14,10 @@ from qiskit.primitives import BaseEstimatorV2, DataBin, PrimitiveResult, PubResu
 from qiskit.primitives.containers.estimator_pub import EstimatorPub, EstimatorPubLike
 from qiskit.primitives.primitive_job import PrimitiveJob
 
-from . import _execution, evolution
+from . import _execution, cloud, evolution
 from .bit_order import pauli_label_to_maestro
 from .converter import ConvertedCircuit, convert
-from .exceptions import UnsupportedInstructionError, UnsupportedNoiseError
+from .exceptions import QoroCloudError, UnsupportedInstructionError, UnsupportedNoiseError
 from .noise import NoiseTranslator
 from .options import (
     AUTOMATIC,
@@ -105,6 +105,38 @@ _EVOLUTION_LIMITS = {
 }
 
 
+class _PubPlan:
+    """The Pauli strings a PUB's parameter sets need, and how its values combine them.
+
+    ``labels[j]`` lists the Maestro-order strings parameter set ``j`` needs,
+    each once, in the order their values are given to :meth:`evs`.
+    """
+
+    def __init__(self, pub: EstimatorPub, circuit: ConvertedCircuit):
+        self.angle_rows = circuit.angle_rows(pub.parameter_values)
+        self.shape = pub.shape
+        self.set_of = np.broadcast_to(
+            np.arange(len(self.angle_rows)).reshape(pub.parameter_values.shape), self.shape
+        )
+        observable_of = np.broadcast_to(np.asarray(pub.observables), self.shape)
+        self.labels: list[dict[str, int]] = [{} for _ in self.angle_rows]
+        parsed: dict[int, tuple] = {}
+        # For every result entry, its observable and the index of each of its
+        # terms in its parameter set's labels.
+        self.entries = []
+        for index in np.ndindex(self.shape):
+            observable = _parse(observable_of[index], parsed)
+            columns = observable.columns(self.labels[self.set_of[index]])
+            self.entries.append((index, observable, columns))
+
+    def evs(self, estimates: Sequence[tuple[np.ndarray, Any]]) -> np.ndarray:
+        """The expectation values, from ``(values, info)`` for each parameter set."""
+        evs = np.empty(self.shape, dtype=float)
+        for index, observable, columns in self.entries:
+            evs[index] = observable.value(columns, estimates[self.set_of[index]][0])
+        return evs
+
+
 class MaestroEstimator(BaseEstimatorV2):
     """Expectation values on Maestro, a drop-in for ``StatevectorEstimator`` and Aer's ``EstimatorV2``.
 
@@ -137,6 +169,10 @@ class MaestroEstimator(BaseEstimatorV2):
             gives exact noisy values; pure-state methods average
             1,024 noise trajectories, as Aer's ``EstimatorV2`` does on its
             statevector method.
+        service: A ``divi.backends.QoroService`` to run on the Qoro cloud, one
+            expectation-value job per :meth:`run`. ``None`` (default) runs
+            locally. On the cloud, circuits can't have resets or a noise model
+            yet, and :meth:`run_evolution` isn't available.
     """
 
     def __init__(
@@ -146,6 +182,7 @@ class MaestroEstimator(BaseEstimatorV2):
         seed: int | None = None,
         options: Mapping[str, Any] | None = None,
         incremental_evolution: bool = True,
+        service=None,
         **simulator_options,
     ):
         simulator_options = merge_aer_options(
@@ -155,14 +192,19 @@ class MaestroEstimator(BaseEstimatorV2):
             default_precision = options["default_precision"]
         if seed is not None:
             simulator_options["seed_simulator"] = seed
-        self._options = resolve_options(simulator_options)
+        if service is not None:
+            cloud.check_service(service)
+        self._service = service
+        self._options = resolve_options(simulator_options, local=service is None)
+        if service is not None:
+            cloud.check_options(self._options)
         self._default_precision = default_precision
         self._incremental_evolution = incremental_evolution
 
     @classmethod
     def from_backend(cls, backend, **kwargs) -> MaestroEstimator:
-        """An estimator with the simulator options of a :class:`~qiskit_maestro.MaestroBackend`."""
-        return cls(**{**backend.simulator_options(), **kwargs})
+        """An estimator with the simulator options and service of a :class:`~qiskit_maestro.MaestroBackend`."""
+        return cls(**{**backend.simulator_options(), "service": backend.service, **kwargs})
 
     @property
     def default_precision(self) -> float:
@@ -177,9 +219,21 @@ class MaestroEstimator(BaseEstimatorV2):
         """The simulator options in use."""
         return dict(self._options)
 
+    @property
+    def service(self):
+        """The ``QoroService`` the estimator runs on, or ``None`` when it runs locally."""
+        return self._service
+
     def run(
         self, pubs: Iterable[EstimatorPubLike], *, precision: float | None = None
     ) -> PrimitiveJob[PrimitiveResult[PubResult]]:
+        """Estimate the PUBs.
+
+        Locally, the job runs in the background. With a ``service``, the PUBs'
+        circuits are submitted to the Qoro cloud as one expectation-value job
+        before this returns, and the returned
+        :class:`~qiskit_maestro.cloud.QoroCloudPrimitiveJob` has the cloud's job ID.
+        """
         if precision is None:
             precision = self._default_precision
         coerced = [EstimatorPub.coerce(pub, precision) for pub in pubs]
@@ -193,7 +247,9 @@ class MaestroEstimator(BaseEstimatorV2):
             method = resolve_method(self._options, circuit, _execution.NOISE_TRAJECTORIES, noisy)
             converted.append(circuit.with_noise(translator, method))
             options.append({**self._options, "method": method})
-        validate_combination(self._options)
+        validate_combination(self._options, local=self._service is None)
+        if self._service is not None:
+            return self._submit_cloud(coerced, converted, options)
         job = PrimitiveJob(self._run, coerced, converted, options)
         job._submit()
         return job
@@ -232,7 +288,14 @@ class MaestroEstimator(BaseEstimatorV2):
         Raises:
             UnsupportedInstructionError: if a circuit holds a ``reset``, which
                 Maestro's incremental evolution doesn't apply correctly yet.
+            QoroCloudError: if the estimator runs on the Qoro cloud, which
+                doesn't offer incremental evolution yet.
         """
+        if self._service is not None:
+            raise QoroCloudError(
+                "run_evolution isn't available on the Qoro cloud yet. Use run() with one "
+                "circuit per time point, or run it locally, without service=."
+            )
         if precision is None:
             precision = self._default_precision
         if initial_state.num_qubits != step.num_qubits:
@@ -378,24 +441,65 @@ class MaestroEstimator(BaseEstimatorV2):
             results[i] = self._result(pub.precision, evs, metadata, [row_info], evolved=True)
         return results
 
+    def _submit_cloud(
+        self, pubs: list[EstimatorPub], converted: list[ConvertedCircuit], options
+    ) -> cloud.QoroCloudPrimitiveJob:
+        """Submit every parameter set of every PUB as one expectation-value job on the cloud."""
+        programs = []
+        plans = []
+        for i, (pub, circuit) in enumerate(zip(pubs, converted)):
+            if any(op.kind == "reset" for op in circuit.ops):
+                raise UnsupportedInstructionError(
+                    "reset",
+                    "resets in Estimator circuits can't run on the Qoro cloud yet. Run the "
+                    "circuit locally, without service=.",
+                )
+            plan = _PubPlan(pub, circuit)
+            plans.append(plan)
+            # The parameter sets with something to evaluate.
+            sets = [j for j, needed in enumerate(plan.labels) if needed]
+            programs.append(
+                cloud.Program(
+                    circuit,
+                    plan.angle_rows[sets],
+                    [f"{i}/{j}" for j in sets],
+                    terms=[list(plan.labels[j]) for j in sets],
+                )
+            )
+        # Without noise, every circuit resolves to the same method.
+        job_options = _execution._estimate_options(options[0] if options else self._options)
+        run = cloud.CloudRun(
+            self._service,
+            programs,
+            cloud.maestro_config(job_options),
+            gpu=job_options["device"] == "GPU",
+        )
+
+        def build(results) -> PrimitiveResult[PubResult]:
+            out = []
+            for i, (pub, plan) in enumerate(zip(pubs, plans)):
+                estimates = [
+                    cloud.to_expectations(results[f"{i}/{j}"], list(needed), options[i])
+                    if needed
+                    else (np.zeros(0), None)
+                    for j, needed in enumerate(plan.labels)
+                ]
+                metadata = {"circuit_metadata": pub.circuit.metadata}
+                result = self._result(
+                    pub.precision, plan.evs(estimates), metadata, [info for _, info in estimates]
+                )
+                if run.submitted:
+                    result.metadata["qoro_job_id"] = run.job_id
+                out.append(result)
+            return PrimitiveResult(out, metadata={"version": 2})
+
+        return cloud.QoroCloudPrimitiveJob(run, build)
+
     def _run_pub(
         self, pub: EstimatorPub, circuit: ConvertedCircuit, options: dict[str, Any]
     ) -> PubResult:
-        angle_rows = circuit.angle_rows(pub.parameter_values)
-        shape = pub.shape
-        set_of = np.broadcast_to(
-            np.arange(len(angle_rows)).reshape(pub.parameter_values.shape), shape
-        )
-        observable_of = np.broadcast_to(np.asarray(pub.observables), shape)
-
-        # The Pauli strings each parameter set needs, each listed once, and for
-        # every result entry the index of each of its terms in that list.
-        labels: list[dict[str, int]] = [{} for _ in angle_rows]
-        parsed: dict[int, tuple] = {}
-        plan = []
-        for index in np.ndindex(shape):
-            observable = _parse(observable_of[index], parsed)
-            plan.append((index, observable, observable.columns(labels[set_of[index]])))
+        plan = _PubPlan(pub, circuit)
+        angle_rows, labels = plan.angle_rows, plan.labels
 
         # Maestro's seeds (used by mid-circuit resets) come from their own
         # stream, so the precision noise matches StatevectorEstimator's draw
@@ -406,12 +510,10 @@ class MaestroEstimator(BaseEstimatorV2):
         estimates = _execution.estimate(
             circuit, angle_rows, [list(needed) for needed in labels], options, seeds
         )
-
-        evs = np.empty(shape, dtype=float)
-        for index, observable, columns in plan:
-            evs[index] = observable.value(columns, estimates[set_of[index]][0])
         metadata = {"circuit_metadata": pub.circuit.metadata}
-        return self._result(pub.precision, evs, metadata, [info for _, info in estimates])
+        return self._result(
+            pub.precision, plan.evs(estimates), metadata, [info for _, info in estimates]
+        )
 
     def _result(self, precision, evs, metadata, infos, *, evolved: bool = False) -> PubResult:
         """Add the precision noise and assemble a ``PubResult``."""
@@ -424,7 +526,8 @@ class MaestroEstimator(BaseEstimatorV2):
         else:
             stds = np.zeros(evs.shape)
         metadata = {"target_precision": precision, **metadata}
-        infos = [info for info in infos if info is not None]
+        # The Qoro cloud's results come without info.
+        infos = [info for info in infos if info]
         if infos:
             metadata["maestro"] = run_info(infos)
             if evolved:

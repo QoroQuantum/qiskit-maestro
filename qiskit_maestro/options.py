@@ -209,17 +209,23 @@ def merge_aer_options(
     return merged
 
 
-def resolve_options(*layers: Mapping[str, Any]) -> dict[str, Any]:
-    """Apply option layers over the defaults and validate the result."""
+def resolve_options(*layers: Mapping[str, Any], local: bool = True) -> dict[str, Any]:
+    """Apply option layers over the defaults and validate the result.
+
+    ``local`` is ``False`` for runs on the Qoro cloud; see :func:`validate_combination`.
+    """
     options = dict(DEFAULT_OPTIONS)
     for layer in layers:
         options.update(normalize_options(layer))
-    validate_combination(options)
+    validate_combination(options, local=local)
     return options
 
 
-def validate_combination(options: Mapping[str, Any]) -> None:
+def validate_combination(options: Mapping[str, Any], *, local: bool = True) -> None:
     """Check a full set of options, including that a requested GPU can be used.
+
+    With ``local=False``, for runs on the Qoro cloud, this machine's GPU isn't
+    checked: the cloud's is used.
 
     Raises:
         MaestroGpuError: if ``device="GPU"`` can't be honoured.
@@ -231,7 +237,7 @@ def validate_combination(options: Mapping[str, Any]) -> None:
             f"method={options['method']!r} doesn't run on Maestro's GPU backend, which "
             f"supports {sorted(GPU_METHODS)}."
         )
-    if not maestro.is_gpu_available():
+    if local and not maestro.is_gpu_available():
         raise MaestroGpuError(
             "device='GPU' was requested, but Maestro's GPU backend isn't available: the "
             "GPU plugin couldn't be loaded, no CUDA device is visible, or the licence "
@@ -309,13 +315,22 @@ def check_device(result: Mapping[str, Any], options: Mapping[str, Any]) -> None:
 
 
 def run_info(results: list[Mapping[str, Any]]) -> dict[str, list[str]]:
-    """The simulators and methods Maestro actually used, for result metadata."""
-    return {
-        "simulators": sorted(
-            {SIMULATOR_NAMES.get(r["simulator"], str(r["simulator"])) for r in results}
-        ),
-        "methods": sorted({METHOD_NAMES.get(r["method"], str(r["method"])) for r in results}),
-    }
+    """The simulators and methods Maestro actually used, for result metadata.
+
+    Results that don't say are left out; the Qoro cloud's never do. With none
+    that say, the dict is empty.
+    """
+    simulators = sorted(
+        {
+            SIMULATOR_NAMES.get(r["simulator"], str(r["simulator"]))
+            for r in results
+            if "simulator" in r
+        }
+    )
+    methods = sorted(
+        {METHOD_NAMES.get(r["method"], str(r["method"])) for r in results if "method" in r}
+    )
+    return {"simulators": simulators, "methods": methods} if simulators or methods else {}
 
 
 def parallel_workers(options: Mapping[str, Any], num_qubits: int, num_tasks: int) -> int:
