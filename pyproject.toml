@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qiskit-maestro"
-version = "0.1.0"
+version = "0.2.0"
 description = "Qiskit backend, Sampler and Estimator for the Maestro quantum simulator by Qoro Quantum"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.2.0]
 
 - CI runs on every push to every branch, not only on `main`, and adds Python
   3.14, macOS, the Qoro cloud tests (skipped in CI before, since Divi wasn't
