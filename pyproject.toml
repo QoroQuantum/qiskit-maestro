@@ -25,6 +25,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
@@ -53,6 +54,14 @@ markers = [
     "gpu: needs Maestro's GPU backend; skipped when no GPU is available",
     "slow: large circuits (100+ qubit MPS, 1,000-qubit stabilizer)",
 ]
+
+[tool.coverage.run]
+source = ["qiskit_maestro"]
+branch = true
+
+[tool.coverage.report]
+# CI's coverage job fails below this. The suite covered 95% when it was set.
+fail_under = 93
 
 [tool.ruff]
 line-length = 100

@@ -101,8 +101,11 @@ lists every method and option.
   a two-line Aer noise-model port, a VQE loop on MPS, time evolution, and the cloud.
 - [Maestro docs](https://qoroquantum.github.io/maestro/), including
   [Coming from Qiskit Aer](https://qoroquantum.github.io/maestro/getting-started/coming-from-qiskit.html).
-- [Contributing](https://github.com/QoroQuantum/qiskit-maestro/blob/main/CONTRIBUTING.md)
-  and [Code of Conduct](https://github.com/QoroQuantum/qiskit-maestro/blob/main/CODE_OF_CONDUCT.md).
+- [Contributing](https://github.com/QoroQuantum/qiskit-maestro/blob/main/CONTRIBUTING.md):
+  running the tests, and
+  [what CI checks](https://github.com/QoroQuantum/qiskit-maestro/blob/main/CONTRIBUTING.md#what-ci-runs)
+  on every push.
+- [Code of Conduct](https://github.com/QoroQuantum/qiskit-maestro/blob/main/CODE_OF_CONDUCT.md).
 
 ## License
 

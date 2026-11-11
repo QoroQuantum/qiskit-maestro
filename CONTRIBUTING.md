@@ -43,13 +43,38 @@ pytest
 ```
 
 To test against Qiskit 1.x as well, make a second environment with
-`pip install -e ".[test]" "qiskit<2"`. CI runs Python 3.10 to 3.13 against the
-latest Qiskit 1.x and 2.x, plus Qiskit 1.1, the oldest version supported.
+`pip install -e ".[test]" "qiskit<2"`. The Qoro cloud tests in
+`tests/test_cloud.py` skip unless Divi is installed: use `".[test,cloud]"`
+(Python 3.11 or later) to run them. They use a stand-in `QoroService` that runs
+each job on Divi's local simulator, so they need no network or API key. For
+coverage, `pip install pytest-cov` and run `pytest --cov`.
 
 Tests marked `gpu` run only where Maestro's GPU backend is available, and are
 skipped elsewhere. Tests marked `slow` use 100+ qubit MPS and 1,000-qubit
 stabilizer circuits; they take a few seconds, and `pytest -m "not slow"` skips
 them.
+
+### What CI runs
+
+[`.github/workflows/tests.yml`](.github/workflows/tests.yml) runs on every push
+to every branch, on pull requests into `main`, every Monday against the latest
+releases of the dependencies, and before every release. A new push to a branch
+cancels the run still going for the one before. The workflow runs:
+
+- the tests on Python 3.10 to 3.14 with the latest Qiskit 2.x, and on 3.10 to
+  3.13 with the latest Qiskit 1.x;
+- the Qoro cloud tests, on Python 3.11 and later with Qiskit 2.x, failing if
+  Divi doesn't import rather than skipping;
+- the same on macOS;
+- every dependency at the lowest version `pyproject.toml` allows (Qiskit 1.1,
+  Maestro 0.3.14, NumPy 1.23);
+- coverage, which fails below `fail_under` in `pyproject.toml` and is
+  summarised on the run's page;
+- a build of the sdist and wheel, checked by `scripts/verify_dist.py`;
+- `ruff`, the SPDX headers, and `actionlint` on the workflows.
+
+To run it by hand, use "Run workflow" on the Tests workflow in the Actions tab.
+Dependabot opens one pull request a month to update the workflows' actions.
 
 ## Making a change (maintainers)
 

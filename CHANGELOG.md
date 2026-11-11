@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- CI runs on every push to every branch, not only on `main`, and adds Python
+  3.14, macOS, the Qoro cloud tests (skipped in CI before, since Divi wasn't
+  installed), a job with every dependency at the lowest version allowed, a
+  coverage floor, and `actionlint` on the workflows. The save-instruction and
+  OpenQASM 2 tests now pass on Qiskit 1.1 too. Dependabot keeps the workflows'
+  actions up to date.
 - A shorter README, with the Qoro cloud near the top. The details moved to
   `docs/guide.md`, and two new examples cover the cloud
   (`examples/qoro_cloud.py`) and time evolution (`examples/time_evolution.py`).

@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Qoro Quantum
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Once a month, one pull request that moves the workflows' actions to their latest
+# versions. The tests run on it like any other branch.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci

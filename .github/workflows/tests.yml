@@ -5,56 +5,148 @@ name: Tests
 
 on:
   push:
-    branches: ["main"]
+    branches: ["**"]  # Every push to every branch. Release tags are publish.yml's.
   pull_request:
-    branches: ["main"]
+    branches: ["main"]  # Also tests the branch merged into main.
   schedule:
-    - cron: "0 6 * * 1"  # Weekly, to catch new Qiskit and Maestro releases.
+    - cron: "0 6 * * 1"  # Weekly, to catch new Qiskit, Aer, Maestro and Divi releases.
+  workflow_dispatch:  # "Run workflow" in the Actions tab.
   workflow_call:  # Run by publish.yml before it uploads.
+
+permissions:
+  contents: read
+
+# A new push to a branch cancels the run still going for the one before. Runs on
+# main always finish.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:
-    name: Python ${{ matrix.python-version }}, Qiskit ${{ matrix.qiskit }}
-    runs-on: ubuntu-latest
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
-        qiskit: ["1.x", "2.x"]
         include:
-          - qiskit: "1.x"
-            qiskit-spec: '"qiskit>=1.1,<2"'
-          - qiskit: "2.x"
-            qiskit-spec: '"qiskit>=2.0,<3"'
-          # The oldest supported Qiskit, the floor in pyproject.toml.
-          - python-version: "3.11"
-            qiskit: "1.1"
-            qiskit-spec: '"qiskit==1.1.*" "numpy<2.3"'
+          # The latest Qiskit 2.x on every supported Python. Divi needs Python 3.11 or
+          # later, so the Qoro cloud tests (tests/test_cloud.py) run from 3.11 on.
+          - name: Python 3.10, Qiskit 2.x
+            python: "3.10"
+            qiskit: "qiskit>=2.0,<3"
+            extras: test
+          - name: Python 3.11, Qiskit 2.x, cloud
+            python: "3.11"
+            qiskit: "qiskit>=2.0,<3"
+            extras: test,cloud
+          - name: Python 3.12, Qiskit 2.x, cloud
+            python: "3.12"
+            qiskit: "qiskit>=2.0,<3"
+            extras: test,cloud
+          - name: Python 3.13, Qiskit 2.x, cloud, coverage
+            python: "3.13"
+            qiskit: "qiskit>=2.0,<3"
+            extras: test,cloud
+            coverage: true
+          - name: Python 3.14, Qiskit 2.x, cloud
+            python: "3.14"
+            qiskit: "qiskit>=2.0,<3"
+            extras: test,cloud
+          # The latest Qiskit 1.x, which predates Python 3.14.
+          - name: Python 3.10, Qiskit 1.x
+            python: "3.10"
+            qiskit: "qiskit>=1.1,<2"
+            extras: test
+          - name: Python 3.11, Qiskit 1.x
+            python: "3.11"
+            qiskit: "qiskit>=1.1,<2"
+            extras: test
+          - name: Python 3.12, Qiskit 1.x
+            python: "3.12"
+            qiskit: "qiskit>=1.1,<2"
+            extras: test
+          - name: Python 3.13, Qiskit 1.x
+            python: "3.13"
+            qiskit: "qiskit>=1.1,<2"
+            extras: test
+          # macos-latest is Apple silicon, which Maestro's macOS wheels are built for.
+          - name: macOS, Python 3.13, Qiskit 2.x, cloud
+            os: macos-latest
+            python: "3.13"
+            qiskit: "qiskit>=2.0,<3"
+            extras: test,cloud
+          # Every dependency at the lowest version pyproject.toml allows (Qiskit 1.1,
+          # Maestro 0.3.14, NumPy 1.23), so those floors stay true.
+          - name: Python 3.10, oldest supported versions
+            python: "3.10"
+            lowest: true
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python }}
 
       - uses: astral-sh/setup-uv@v4
 
       - name: Install
-        # Each qiskit-spec is a list of quoted requirements.
-        run: uv pip install --system -e ".[test]" ${{ matrix.qiskit-spec }}
+        env:
+          LOWEST: ${{ matrix.lowest }}
+          EXTRAS: ${{ matrix.extras }}
+          QISKIT: ${{ matrix.qiskit }}
+          COVERAGE: ${{ matrix.coverage }}
+        run: |
+          if [ "$LOWEST" = true ]; then
+            # The package's dependencies at their floors, then the newest test tools
+            # that work with them.
+            uv pip install --system --resolution lowest-direct -e .
+            uv pip install --system pytest qiskit-aer
+          elif [ "$COVERAGE" = true ]; then
+            uv pip install --system -e ".[$EXTRAS]" "$QISKIT" pytest-cov
+          else
+            uv pip install --system -e ".[$EXTRAS]" "$QISKIT"
+          fi
 
       - name: Show versions
-        run: python -c "import qiskit, qiskit_aer, maestro, importlib.metadata as m; print('qiskit', qiskit.__version__, '| qiskit-aer', qiskit_aer.__version__, '| qoro-maestro', m.version('qoro-maestro'))"
+        shell: python
+        run: |
+          import importlib.metadata as m
+          import sys
+
+          print("python", sys.version.split()[0])
+          for name in ["qiskit", "qiskit-aer", "qoro-maestro", "qoro-divi", "numpy", "pytest"]:
+              try:
+                  print(name, m.version(name))
+              except m.PackageNotFoundError:
+                  print(name, "not installed")
+
+      - name: Check the cloud tests can run
+        if: contains(matrix.extras, 'cloud')
+        # tests/test_cloud.py skips itself when Divi doesn't import. Here that's an error.
+        run: python -c "import divi.backends, requests"
 
       - name: Test
-        run: pytest -v
+        if: ${{ !matrix.coverage }}
+        run: pytest -v -ra
+
+      - name: Test, measuring coverage
+        if: ${{ matrix.coverage }}
+        # Fails below [tool.coverage.report] fail_under in pyproject.toml.
+        run: pytest -v -ra --cov --cov-report=term-missing
+
+      - name: Coverage summary
+        if: ${{ matrix.coverage && !cancelled() }}
+        run: coverage report --format=markdown --fail-under=0 >> "$GITHUB_STEP_SUMMARY"
 
   dist:
     name: Source distribution and wheel
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v5
         with:
@@ -72,12 +164,25 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
       - uses: astral-sh/setup-uv@v4
+
       - run: uvx ruff check .
+
       - run: uvx ruff format --check .
+
       - name: SPDX headers
         run: |
-          missing=$(grep -L "SPDX-License-Identifier: GPL-3.0-or-later" $(git ls-files '*.py' '*.toml' '*.yml'))
-          if [ -n "$missing" ]; then echo "::error::Missing SPDX header: $missing"; exit 1; fi
+          missing=$(git ls-files -z '*.py' '*.toml' '*.yml' \
+            | xargs -0 grep -L "SPDX-License-Identifier: GPL-3.0-or-later" || true)
+          if [ -n "$missing" ]; then
+            echo "::error::Missing SPDX header: $missing"
+            exit 1
+          fi
+
+      - name: Workflows
+        # actionlint, with shellcheck (installed on the runner) on every run: script.
+        run: uvx --from actionlint-py actionlint
