@@ -217,6 +217,9 @@ cloud instead of on your machine:
 pip install "qiskit-maestro[cloud]"
 ```
 
+This installs Divi 0.16 or later, which needs Python 3.11 or later and Qiskit
+2.6 or later.
+
 ```python
 from divi.backends import QoroService
 from qiskit_maestro import MaestroBackend, MaestroEstimator, MaestroSampler

@@ -34,7 +34,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-cloud = ["qoro-divi>=0.15"]
+cloud = ["qoro-divi>=0.16"]
 test = ["pytest>=7", "qiskit-aer>=0.14"]
 notebook = ["qiskit-aer>=0.14", "jupyter", "matplotlib"]
 

@@ -26,7 +26,7 @@ from qiskit.primitives import BasePrimitiveJob
 from qiskit.providers import JobStatus, JobTimeoutError, JobV1
 from qiskit.providers.jobstatus import JOB_FINAL_STATES
 
-from .bit_order import qiskit_counts_to_outcomes
+from .bit_order import maestro_counts_to_outcomes
 from .converter import QASM2_PARAMETER_PREFIX, ConvertedCircuit
 from .exceptions import QoroCloudError
 from .options import check_device, simulator_config
@@ -99,13 +99,14 @@ def maestro_config(options: Mapping[str, Any]):
 def to_samples(entry: Mapping[str, Any], num_clbits: int, options: Mapping[str, Any]):
     """One circuit's cloud result entry as :class:`~qiskit_maestro._execution.Samples`.
 
-    The entry's counts are keyed by Qiskit-order bitstrings. Its metadata is
+    Since Divi 0.16, the entry's counts are keyed as Maestro keys them, with
+    clbit 0 leftmost, for every simulator job. Its metadata is
     Maestro's result info; when it says where the circuit ran, a GPU run that
     fell back to the CPU raises as it does locally.
     """
     from ._execution import Samples
 
-    outcomes, frequencies = qiskit_counts_to_outcomes(entry["results"], num_clbits)
+    outcomes, frequencies = maestro_counts_to_outcomes(entry["results"], num_clbits)
     return Samples(outcomes, frequencies, entry_info(entry, options))
 
 

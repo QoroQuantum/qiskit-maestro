@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-- Run on the Qoro cloud: `service=QoroService()` (from Divi, installed with
-  `pip install "qiskit-maestro[cloud]"`) on `MaestroBackend`, `MaestroSampler`
+- Run on the Qoro cloud: `service=QoroService()` (from Divi 0.16 or later,
+  installed with `pip install "qiskit-maestro[cloud]"`, which needs Python 3.11
+  or later and Qiskit 2.6 or later) on `MaestroBackend`, `MaestroSampler`
   and `MaestroEstimator`. Each `run()` submits one cloud job and returns a
   `QoroCloudJob` (backend) or `QoroCloudPrimitiveJob` (primitives) carrying the
   cloud's job ID, with `status()`, `cancel()`, and `result()` that waits. The
