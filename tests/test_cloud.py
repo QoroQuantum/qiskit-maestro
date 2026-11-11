@@ -12,13 +12,16 @@ and terms are what divi takes, and the results come back in divi's format.
 from __future__ import annotations
 
 import re
+import runpy
 import threading
+from pathlib import Path
 
 import maestro
 import numpy as np
 import pytest
 from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
 from qiskit.circuit import Parameter
+from qiskit.primitives import StatevectorEstimator
 from qiskit.providers import JobStatus, JobTimeoutError
 from qiskit.quantum_info import SparsePauliOp
 
@@ -560,3 +563,20 @@ def test_concurrent_waits_fetch_once():
     for thread in threads:
         thread.join()
     assert len(calls) == 1
+
+
+def test_cloud_example(monkeypatch):
+    monkeypatch.setattr(backends, "QoroService", FakeQoroService)
+    example = runpy.run_path(
+        str(Path(__file__).resolve().parent.parent / "examples" / "qoro_cloud.py")
+    )
+    assert example["job_id"] == "job-1"
+    assert example["status"] == JobStatus.DONE
+    assert set(example["counts"]) == {"0" * 20, "1" * 20}
+    assert sum(example["counts"].values()) == 1000
+    assert example["bits"].shape == (8,)
+    assert example["bits"].num_shots == 500
+    exact = StatevectorEstimator().run(
+        [(example["ansatz"], example["hamiltonian"], example["values"])]
+    )
+    np.testing.assert_allclose(example["evs"], exact.result()[0].data.evs, atol=1e-8)

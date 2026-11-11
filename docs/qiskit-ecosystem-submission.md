@@ -97,5 +97,5 @@ MaestroEstimator (V2 primitives). It exposes Maestro's statevector, matrix
 product state, stabilizer, extended stabilizer, density matrix, tensor network and Pauli propagation
 methods, and its licensed GPU backend. Results use Qiskit's bit order, and the
 tests compare them with StatevectorSampler, StatevectorEstimator and Aer on
-Qiskit 1.x and 2.x. The README lists what isn't supported yet.
+Qiskit 1.x and 2.x. docs/guide.md lists what isn't supported yet.
 ```

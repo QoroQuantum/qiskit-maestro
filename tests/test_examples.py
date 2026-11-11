@@ -52,3 +52,10 @@ def test_aer_noise_model_example_changes_two_lines_and_matches_aer(tmp_path):
     assert mine["zzz"] == pytest.approx(theirs["zzz"], abs=5 / np.sqrt(shots))
     assert mine["state"].is_valid()
     assert mine["state"].num_qubits == theirs["state"].num_qubits
+
+
+def test_time_evolution_example_agrees_both_ways():
+    example = runpy.run_path(str(EXAMPLES / "time_evolution.py"))
+    np.testing.assert_allclose(example["per_circuit"], example["from_step"], atol=1e-10)
+    assert example["from_step"][0] == pytest.approx(1.0)
+    assert len(example["from_step"]) == 21

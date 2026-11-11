@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A shorter README, with the Qoro cloud near the top. The details moved to
+  `docs/guide.md`, and two new examples cover the cloud
+  (`examples/qoro_cloud.py`) and time evolution (`examples/time_evolution.py`).
 - Run on the Qoro cloud: `service=QoroService()` (from Divi 0.16 or later,
   installed with `pip install "qiskit-maestro[cloud]"`, which needs Python 3.11
   or later and Qiskit 2.6 or later) on `MaestroBackend`, `MaestroSampler`
