@@ -41,8 +41,10 @@ def _state_circuit() -> QuantumCircuit:
 
 
 def _aer_data(circuit, **options):
-    # Aer doesn't know QFTGate; its definition holds the same global phase.
-    circuit = circuit.decompose(gates_to_decompose=["qft"])
+    # Aer doesn't know QFTGate, or before Qiskit 1.2 the QFT circuit as a gate, named
+    # "QFT", whose definition is itself a "QFT" gate. The definitions hold the same
+    # global phase.
+    circuit = circuit.decompose(gates_to_decompose=["qft", "QFT"], reps=2)
     return AerSimulator(**options).run(circuit, shots=200, seed_simulator=1).result().data(0)
 
 

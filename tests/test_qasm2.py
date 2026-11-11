@@ -44,7 +44,8 @@ def _assert_same_state(circuit: QuantumCircuit, values=None, *, exact: bool = Tr
 
 
 def _bindings(circuit, values):
-    from qiskit.primitives.containers import BindingsArray
+    # Qiskit 1.1 doesn't export it from qiskit.primitives.containers.
+    from qiskit.primitives.containers.bindings_array import BindingsArray
 
     return BindingsArray({tuple(circuit.parameters): np.asarray(values, dtype=float)})
 
