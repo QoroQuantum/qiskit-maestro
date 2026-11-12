@@ -10,3 +10,7 @@ build/
 .DS_Store
 .env
 .coverage
+# Sphinx output, and the example notebook docs/conf.py copies in.
+docs/_build/
+docs/jupyter_execute/
+docs/examples/*.ipynb

@@ -54,6 +54,32 @@ skipped elsewhere. Tests marked `slow` use 100+ qubit MPS and 1,000-qubit
 stabilizer circuits; they take a few seconds, and `pytest -m "not slow"` skips
 them.
 
+### Building the docs
+
+The documentation in `docs/` is a Sphinx site with the
+[Qiskit ecosystem theme](https://github.com/Qiskit/qiskit_sphinx_theme),
+published at [qoroquantum.github.io/qiskit-maestro](https://qoroquantum.github.io/qiskit-maestro/).
+To build it:
+
+```bash
+pip install -e ".[docs]"
+sphinx-build -W --keep-going -b html docs docs/_build/html
+```
+
+Then open `docs/_build/html/index.html`. Some pages come from files outside
+`docs/`, so each is edited in one place:
+
+- the home page shows `README.md` between its `start-docs` and `end-docs`
+  markers, and the Changelog page shows `CHANGELOG.md`;
+- the example pages show the scripts in `examples/`, and the build copies
+  `examples/vqe_aer_vs_maestro.ipynb` in, with its saved outputs, without
+  running it;
+- the API reference, `docs/api.rst`, takes the docstrings, but lists the
+  members it shows, so add new public methods there.
+
+`docs/maestro-api-notes.md` and `docs/qiskit-ecosystem-submission.md` are notes
+for maintainers and stay out of the site.
+
 ### What CI runs
 
 [`.github/workflows/tests.yml`](.github/workflows/tests.yml) runs on every push
@@ -74,6 +100,11 @@ cancels the run still going for the one before. The workflow runs:
 - `ruff`, the SPDX headers, and `actionlint` on the workflows.
 
 To run it by hand, use "Run workflow" on the Tests workflow in the Actions tab.
+
+[`.github/workflows/docs.yml`](.github/workflows/docs.yml) builds the docs on
+every push, failing on any Sphinx warning, and publishes them to GitHub Pages
+from `main`.
+
 Dependabot opens one pull request a month to update the workflows' actions.
 
 ## Making a change (maintainers)

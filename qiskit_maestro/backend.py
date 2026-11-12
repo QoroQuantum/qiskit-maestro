@@ -176,6 +176,17 @@ class MaestroBackend(BackendV2):
         return None
 
     def set_options(self, **fields):
+        """Change options, as on ``AerSimulator``.
+
+        Args:
+            fields: ``shots``, ``memory`` or any option the constructor takes.
+                Setting ``noise_model`` also changes the target's basis gates.
+
+        Raises:
+            ValueError: for an unknown option, or a value the option can't take.
+            MaestroGpuError: if ``device="GPU"`` can't be used.
+            QoroCloudError: for a noise model on a backend that runs on the cloud.
+        """
         run_only = {k: fields.pop(k) for k in list(fields) if k in _RUN_DEFAULTS}
         given = normalize_options(fields)
         merged = resolve_options(self.simulator_options(), given, local=self._service is None)

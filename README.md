@@ -2,7 +2,11 @@
 
 [![Tests](https://github.com/QoroQuantum/qiskit-maestro/actions/workflows/tests.yml/badge.svg)](https://github.com/QoroQuantum/qiskit-maestro/actions/workflows/tests.yml)
 [![PyPI](https://img.shields.io/pypi/v/qiskit-maestro.svg)](https://pypi.org/project/qiskit-maestro/)
+[![Qiskit Ecosystem](https://qisk.it/e-326b1ab9)](https://qisk.it/e)
 [![License: GPL v3+](https://img.shields.io/badge/License-GPLv3%2B-blue.svg)](https://github.com/QoroQuantum/qiskit-maestro/blob/main/LICENSE)
+
+<!-- The documentation's home page (docs/index.md) shows the README from here to "end-docs". -->
+<!-- start-docs -->
 
 Run your Qiskit code on the [Maestro](https://github.com/QoroQuantum/maestro)
 quantum simulator, on your machine or in the Qoro cloud, by changing one import.
@@ -71,7 +75,7 @@ Add `device="GPU"` to run on Qoro's GPU cluster.
 [examples/qoro_cloud.py](https://github.com/QoroQuantum/qiskit-maestro/blob/main/examples/qoro_cloud.py)
 runs all three on the cloud. A few features, such as noise models and classical
 control, run locally only for now: see the
-[guide](https://github.com/QoroQuantum/qiskit-maestro/blob/main/docs/guide.md#qoro-cloud).
+[guide](https://qoroquantum.github.io/qiskit-maestro/guide.html#qoro-cloud).
 
 ## Pick a simulation method
 
@@ -89,16 +93,21 @@ backend = MaestroBackend(method="mps", max_bond_dimension=64)
 
 Pass an Aer `NoiseModel` as `noise_model=`, and `device="GPU"` for your own GPU
 ([get GPU access](https://qoroquantum.github.io/maestro/getting-started/gpu-access.html)).
-The [guide](https://github.com/QoroQuantum/qiskit-maestro/blob/main/docs/guide.md#options)
+The [guide](https://qoroquantum.github.io/qiskit-maestro/guide.html#options)
 lists every method and option.
+
+<!-- end-docs -->
 
 ## Learn more
 
-- [Guide](https://github.com/QoroQuantum/qiskit-maestro/blob/main/docs/guide.md):
-  every option, noise models, time evolution, the cloud in detail, and what
-  isn't supported yet.
-- [Examples](https://github.com/QoroQuantum/qiskit-maestro/tree/main/examples):
-  a two-line Aer noise-model port, a VQE loop on MPS, time evolution, and the cloud.
+- [Documentation](https://qoroquantum.github.io/qiskit-maestro/):
+  - [Guide](https://qoroquantum.github.io/qiskit-maestro/guide.html): every
+    option, noise models, time evolution, the cloud in detail, and what isn't
+    supported yet.
+  - [Examples](https://qoroquantum.github.io/qiskit-maestro/examples/): a
+    two-line Aer noise-model port, a VQE loop on MPS, time evolution, and the
+    cloud.
+  - [API reference](https://qoroquantum.github.io/qiskit-maestro/api.html).
 - [Maestro docs](https://qoroquantum.github.io/maestro/), including
   [Coming from Qiskit Aer](https://qoroquantum.github.io/maestro/getting-started/coming-from-qiskit.html).
 - [Contributing](https://github.com/QoroQuantum/qiskit-maestro/blob/main/CONTRIBUTING.md):

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Documentation at
+  [qoroquantum.github.io/qiskit-maestro](https://qoroquantum.github.io/qiskit-maestro/),
+  built with Sphinx and the Qiskit ecosystem theme: the README, the guide, the
+  examples, an API reference generated from the docstrings, and this
+  changelog. `pip install -e ".[docs]"` installs what it needs, and CI builds
+  it on every push and publishes it from `main`. The package's Documentation
+  link on PyPI now points there.
+- The README has the Qiskit Ecosystem badge.
+
 ## [0.2.0]
 
 - CI runs on every push to every branch, not only on `main`, and adds Python

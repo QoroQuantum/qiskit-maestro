@@ -1,19 +1,9 @@
-# qiskit-maestro guide
+# Guide
 
-The details behind the [README](../README.md): how each Qiskit and Aer
-interface maps over, every option, noise models, time evolution, the GPU, the
-Qoro cloud, and what isn't supported yet. Runnable scripts are in
-[examples/](../examples/).
-
-- [Backend, Sampler and Estimator](#backend-sampler-and-estimator)
-- [Options](#options)
-- [Noise models](#noise-models)
-- [Time evolution](#time-evolution)
-- [GPU](#gpu)
-- [Qoro cloud](#qoro-cloud)
-- [Bit order](#bit-order)
-- [What's supported](#whats-supported)
-- [What isn't supported yet](#what-isnt-supported-yet)
+How each Qiskit and Aer interface maps over, every option, noise models, time
+evolution, the GPU, the Qoro cloud, and what isn't supported yet. Runnable
+scripts are in [Examples](examples/index.md), and every class and method is in
+the [API reference](api.rst).
 
 ## Backend, Sampler and Estimator
 
@@ -130,7 +120,7 @@ thermal-relaxation (any T2 ≤ 2·T1) and reset errors are supported, and so are
 their compositions on one or two qubits, which covers `from_backend`. Each
 translation is checked against Aer's channel. An error Maestro can't reproduce
 exactly raises `UnsupportedNoiseError` naming the instruction and qubits, and
-no noise is ever dropped. [examples/aer_noise_model.py](../examples/aer_noise_model.py)
+no noise is ever dropped. [The Aer noise-model example](examples/aer_noise_model.md)
 is a complete Aer script moved over by changing two lines.
 
 ## Time evolution
@@ -145,7 +135,7 @@ one of N steps then costs N steps instead of about N²/2. Circuits built with
 
 You can also give the step directly, without building a circuit per time point:
 `estimator.run_evolution(initial_state, step, observables, steps=range(21))`.
-[examples/time_evolution.py](../examples/time_evolution.py) does it both ways.
+[The time evolution example](examples/time_evolution.md) does it both ways.
 
 Each result's metadata says whether incremental evolution was used. Pass
 `incremental_evolution=False` to simulate every circuit from the start. It
@@ -177,7 +167,7 @@ export QORO_API_KEY=...   # or put it in a .env file
 ```
 
 The `cloud` extra installs Divi 0.16 or later, which needs Python 3.11 or later
-and Qiskit 2.6 or later. [examples/qoro_cloud.py](../examples/qoro_cloud.py)
+and Qiskit 2.6 or later. [The Qoro cloud example](examples/qoro_cloud.md)
 runs the backend, the sampler and the estimator on the cloud.
 
 Each `run()` sends its circuits as one cloud job and returns at once.

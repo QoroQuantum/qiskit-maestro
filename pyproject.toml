@@ -38,10 +38,17 @@ dependencies = [
 cloud = ["qoro-divi>=0.16"]
 test = ["pytest>=7", "qiskit-aer>=0.14"]
 notebook = ["qiskit-aer>=0.14", "jupyter", "matplotlib"]
+# Builds the documentation in docs/.
+docs = [
+    "sphinx>=8",
+    "qiskit-sphinx-theme>=2.1",
+    "myst-nb>=1.1",
+    "sphinx-copybutton>=0.5",
+]
 
 [project.urls]
 Homepage = "https://github.com/QoroQuantum/qiskit-maestro"
-Documentation = "https://qoroquantum.github.io/maestro/getting-started/coming-from-qiskit.html"
+Documentation = "https://qoroquantum.github.io/qiskit-maestro/"
 Repository = "https://github.com/QoroQuantum/qiskit-maestro"
 Issues = "https://github.com/QoroQuantum/qiskit-maestro/issues"
 
