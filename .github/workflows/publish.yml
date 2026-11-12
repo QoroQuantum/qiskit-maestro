@@ -42,7 +42,7 @@ jobs:
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - id: resolve
         run: |
           version=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
@@ -62,9 +62,9 @@ jobs:
     needs: [version]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -76,7 +76,7 @@ jobs:
       - name: Verify the sdist and wheel
         run: python scripts/verify_dist.py dist/ --run-tests
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: qiskit-maestro-dist
           path: dist/
@@ -92,7 +92,7 @@ jobs:
     permissions:
       id-token: write  # Trusted publishing.
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: qiskit-maestro-dist
           path: dist/
@@ -115,9 +115,9 @@ jobs:
     permissions:
       contents: write  # Creates the release.
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: qiskit-maestro-dist
           path: dist/
