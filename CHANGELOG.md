@@ -22,6 +22,42 @@
 - `benchmarks/pauli_propagation.py`, a short version of the Pauli propagation
   benchmark in Maestro's documentation: accuracy against time for
   `MaestroEstimator` and IBM's `pauli-prop` on a kicked Ising chain.
+- Each Aer error is one `maestro.QuantumChannel`, built once and shared by every
+  instruction it follows, on `density_matrix`, `statevector` and
+  `matrix_product_state` (CPU). The density matrix applies the channel in one
+  pass instead of a Pauli channel and a delay. The statevector and the matrix
+  product state sample it from their own state on every shot, as Aer does:
+  noisy circuits no longer carry an ancilla qubit, and relaxation towards a
+  thermal population (`from_backend(..., temperature=...)`) is sampled too.
+  The other methods and the GPU keep the Pauli channel and the ancilla.
+  With a fake IBM device's full noise model (`benchmarks/noise_vs_aer.py`, Aer
+  0.18.2, a 24-core desktop): the 12-qubit density matrix takes 2.1 s at 1,000
+  shots, where it took 29 s and Aer takes 2.9 s; the statevector is 2.7 to 7.9
+  times as fast as Aer at 6 to 20 qubits; and the matrix product state at a
+  bond limit of 64 is 5 to 15 times as fast at 6 to 16 qubits, and takes two
+  minutes at 20 qubits, where Aer was stopped after fifteen.
+- Coherent errors, mixtures of unitaries and general Kraus channels on one or
+  two qubits run on `density_matrix`, `statevector` and `matrix_product_state`
+  (CPU), from Aer's description of the error: as a mixture of unitaries where
+  its circuits are unitary, and by its Kraus operators otherwise. They raised
+  `UnsupportedNoiseError` before, and still do on the other methods. An error
+  with a single unitary branch, such as a coherent over-rotation, is a gate: a
+  circuit whose errors are all of that kind is evolved once for all its shots.
+- Requires the Maestro release that adds `QuantumChannel` and
+  `QuantumCircuit.channel` (after 0.3.14).
+- `benchmarks/noise_vs_aer.py` times `MaestroBackend` against `AerSimulator`
+  under a fake IBM device's noise model, after checking that they agree: in
+  the full distribution on the density matrix, and on the sampled methods in
+  every qubit's marginal and in the parities of consecutive pairs and of all
+  qubits. A matrix product state whose bond limit truncates the state is not
+  compared with Aer's, which truncates differently: up to 20 qubits, each
+  simulator's error in those statistics is reported against the exact ones,
+  from Maestro's statevector under the same noise. Each run records the
+  versions of Qiskit, Aer, Maestro and the plugin, the QCSim revision Maestro
+  was built against, the threads they could use, the circuit's seed, the bond
+  limit and the workers Maestro ran the noise realizations on.
+- Result metadata gains `metadata["maestro"]["realization_workers"]`: the
+  workers Maestro ran a call's noise realizations on, for sampled noise.
 
 ## [0.2.0]
 

@@ -314,11 +314,13 @@ def check_device(result: Mapping[str, Any], options: Mapping[str, Any]) -> None:
         )
 
 
-def run_info(results: list[Mapping[str, Any]]) -> dict[str, list[str]]:
+def run_info(results: list[Mapping[str, Any]]) -> dict[str, Any]:
     """The simulators and methods Maestro actually used, for result metadata.
 
     Results that don't say are left out; the Qoro cloud's never do. With none
-    that say, the dict is empty.
+    that say, the dict is empty. Where Maestro ran noise realizations on its own
+    workers and says how many, the most any of the calls used is added as
+    ``realization_workers``.
     """
     simulators = sorted(
         {
@@ -330,7 +332,13 @@ def run_info(results: list[Mapping[str, Any]]) -> dict[str, list[str]]:
     methods = sorted(
         {METHOD_NAMES.get(r["method"], str(r["method"])) for r in results if "method" in r}
     )
-    return {"simulators": simulators, "methods": methods} if simulators or methods else {}
+    info: dict[str, Any] = (
+        {"simulators": simulators, "methods": methods} if simulators or methods else {}
+    )
+    workers = [r["realization_workers"] for r in results if r.get("realization_workers")]
+    if workers:
+        info["realization_workers"] = max(workers)
+    return info
 
 
 def parallel_workers(options: Mapping[str, Any], num_qubits: int, num_tasks: int) -> int:

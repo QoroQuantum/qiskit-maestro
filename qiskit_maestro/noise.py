@@ -15,16 +15,24 @@ An error is written as a Pauli channel followed by amplitude damping on each of
 its qubits. That covers depolarizing, Pauli, bit-flip and phase-flip errors,
 phase damping, amplitude damping, thermal relaxation (with any T2 <= 2 T1),
 reset errors, and their compositions, such as the errors of
-``NoiseModel.from_backend``. The Pauli part becomes a ``pauli_channel``. The
-damping becomes, on density-matrix runs, a ``delay`` under Maestro's idle noise,
-which Maestro applies as an exact thermal-relaxation channel; on pure-state
-runs, it becomes an exact amplitude damping on an ancilla qubit, sampled per
-shot like Aer's trajectories.
+``NoiseModel.from_backend``.
 
-Every translation is checked: the operations must reproduce Aer's channel to
-1e-9 in every entry of its Pauli transfer matrix. Errors that fail, such as
-coherent over-rotations, raise :class:`UnsupportedNoiseError` naming the
-instruction and qubits. No noise is dropped.
+Where Maestro holds noise channels, the two parts become one
+:class:`maestro.QuantumChannel`, built once per error and shared by every
+instruction the error follows. The density matrix applies it exactly. The
+statevector and the matrix product state sample it from their state on every
+shot, like Aer's trajectories, on the circuit's own qubits. The other
+pure-state methods and the GPU sample the Pauli part as a ``pauli_channel`` and
+apply the damping exactly through an ancilla qubit.
+
+An error with no such form, such as a coherent over-rotation or a general Kraus
+channel, runs where Maestro holds channels: as a mixture of unitaries if Aer
+describes it with unitary circuits, and by its Kraus operators otherwise.
+
+Every translation is checked: the result must reproduce Aer's channel to 1e-9 in
+every entry of its Pauli transfer matrix. Errors that fail, or that the method
+can't apply, raise :class:`UnsupportedNoiseError` naming the instruction and
+qubits. No noise is dropped.
 """
 
 from __future__ import annotations
@@ -39,7 +47,7 @@ import numpy as np
 
 from .exceptions import UnsupportedNoiseError
 
-__all__ = ["Channel", "NoiseTranslator", "is_aer_noise_model"]
+__all__ = ["Channel", "NoiseTranslator", "general_channel", "is_aer_noise_model"]
 
 # Absolute tolerance on Pauli transfer matrix entries for a translation to count as exact.
 _TOLERANCE = 1e-9
@@ -373,9 +381,9 @@ class NoiseTranslator:
     def channel(self, key: int, family: str) -> Channel:
         """Translate the error ``key`` for ``family``: ``"exact"`` or ``"sampled"``.
 
-        ``"exact"`` is for density-matrix runs, where damping may relax towards a
-        thermal state. ``"sampled"`` is for pure-state runs, where it must relax
-        towards ``|0>``.
+        ``"exact"`` is for the methods that hold channels, where damping may relax
+        towards a thermal state. ``"sampled"`` is for the methods that apply
+        damping through an ancilla, where it must relax towards ``|0>``.
 
         Raises:
             UnsupportedNoiseError: if the error can't be reproduced exactly.
@@ -401,7 +409,13 @@ class NoiseTranslator:
             if family == "sampled" and isinstance(_decomposition(error, thermal), Channel):
                 hint = (
                     " It relaxes towards an excited-state population, which Maestro applies "
-                    "exactly only with method='density_matrix'."
+                    "with method='statevector', 'matrix_product_state' or 'density_matrix' on "
+                    "the CPU."
+                )
+            elif family == "sampled" and _general(error) is not None:
+                hint = (
+                    " Maestro applies it with method='statevector', 'matrix_product_state' or "
+                    "'density_matrix' on the CPU."
                 )
             raise UnsupportedNoiseError(
                 name,
@@ -410,6 +424,37 @@ class NoiseTranslator:
             )
         self._channels[(key, family)] = result
         return result
+
+    def maestro_channel(self, key: int) -> maestro.QuantumChannel | None:
+        """The error ``key`` as one Maestro channel, or ``None`` if it does nothing.
+
+        For the methods that hold channels: the density matrix, the statevector
+        and the matrix product state. The channel is the error's Pauli part
+        followed by its relaxation, which may be towards a thermal state; an
+        error with no such form is taken from Aer's description of it
+        (:func:`general_channel`). The object is built once per Aer error and
+        kept with it, so every instruction with that error, in every run,
+        shares it.
+
+        Raises:
+            UnsupportedNoiseError: if the error can't be reproduced exactly.
+        """
+        error, _, qubits = self._entries[key]
+        excited = tuple(self.excited_population(q) for q in qubits)
+        cache = _translations(error)
+        if ("maestro", excited) in cache:
+            return cache[("maestro", excited)]
+        try:
+            channel = self.channel(key, "exact")
+        except UnsupportedNoiseError:
+            built = _general(error) if error.num_qubits <= 2 else None
+            if built is None:
+                raise
+        else:
+            identity = channel.paulis is None and not channel.decays
+            built = None if identity else structured_channel(channel, excited)
+        cache[("maestro", excited)] = built
+        return built
 
     def readout(self, qubit: int) -> tuple[float, float] | None:
         """``(P(1|0), P(0|1))`` for measurements of ``qubit``, or ``None``."""
@@ -474,18 +519,87 @@ def _decomposition(error, excited: tuple[float, ...]) -> Channel | str | None:
     return result
 
 
-def maestro_noise_model(
-    idle: dict[int, float], readout: dict[int, tuple[float, float]]
-) -> maestro.NoiseModel:
-    """The Maestro noise model a translated circuit runs under.
+def structured_channel(channel: Channel, excited: tuple[float, ...]) -> maestro.QuantumChannel:
+    """A translated error as one Maestro channel on its ``len(excited)`` qubits.
 
-    ``idle`` maps each qubit that has damping ``delay`` operations to its
-    excited-state population. Delays are in units of T1, with T2 = 2 T1, so a
-    delay of ``-ln(a)`` keeps a fraction ``a`` of the excited population.
+    The Pauli part comes first, then relaxation on each damped qubit towards its
+    excited-state population. The relaxation runs for ``-ln(a)`` in units of T1,
+    with T2 = 2 T1, so it keeps a fraction ``a`` of the excited population and
+    ``sqrt(a)`` of the coherences. Maestro keeps the parts apart: a trajectory
+    draws the Pauli part without reading its state.
+    """
+    n = len(excited)
+    if n not in (1, 2):
+        raise ValueError(f"A Maestro channel acts on one or two qubits, not {n}.")
+    result = None
+    if channel.paulis is not None:
+        result = maestro.QuantumChannel.pauli(list(channel.paulis))
+    for k, a in channel.decays:
+        relaxation = maestro.QuantumChannel.thermal_relaxation(-math.log(a), 1.0, 2.0, excited[k])
+        if result is None:
+            result = relaxation if n == 1 else maestro.QuantumChannel.on_qubit(relaxation, k, n)
+        else:
+            result = result.then(relaxation, [k])
+    if result is None:
+        # An error that does nothing. Translations leave it out; this keeps the function total.
+        result = maestro.QuantumChannel.pauli([1.0] + [0.0] * (4**n - 1))
+    return result
+
+
+def general_channel(error) -> maestro.QuantumChannel | None:
+    """An Aer error on one or two qubits as a Maestro channel, from Aer's description of it.
+
+    For the errors with no Pauli-and-damping form. An error whose circuits are
+    all unitary, such as a coherent over-rotation, becomes a mixture of those
+    unitaries, which a trajectory draws without reading its state. Any other
+    becomes its Kraus operators, which a trajectory samples from its state.
+
+    Returns ``None`` if Maestro's channel doesn't reproduce the error's Pauli
+    transfer matrix to 1e-9, or the error isn't a channel.
+    """
+    from qiskit.exceptions import QiskitError
+    from qiskit.quantum_info import Kraus, Operator
+
+    try:
+        unitaries = [
+            np.asarray(Operator(circuit).data, dtype=complex) for circuit in error.circuits
+        ]
+    except (QiskitError, TypeError, ValueError):
+        unitaries = None  # A circuit resets or applies Kraus operators.
+    try:
+        if unitaries is not None:
+            channel = maestro.QuantumChannel.unitary_mixture(
+                [float(p) for p in error.probabilities], [u.tolist() for u in unitaries]
+            )
+        else:
+            operators = Kraus(error.to_quantumchannel()).data
+            if isinstance(operators, tuple):  # Left and right operators: not a channel.
+                return None
+            channel = maestro.QuantumChannel.from_kraus(
+                [np.asarray(k, dtype=complex).tolist() for k in operators]
+            )
+        ptm = _kraus_ptm(np.asarray(channel.kraus_operators))
+    except (QiskitError, TypeError, ValueError):
+        return None
+    if np.max(np.abs(ptm - error_ptm(error))) > _TOLERANCE:
+        return None
+    return channel
+
+
+def _general(error) -> maestro.QuantumChannel | None:
+    """:func:`general_channel` of ``error``, built once and kept with it."""
+    cache = _translations(error)
+    if "general" not in cache:
+        cache["general"] = general_channel(error) if error.num_qubits <= 2 else None
+    return cache["general"]
+
+
+def maestro_noise_model(readout: dict[int, tuple[float, float]]) -> maestro.NoiseModel:
+    """The Maestro noise model a translated circuit runs under: its readout errors.
+
+    The quantum errors are operations of the circuit itself.
     """
     model = maestro.NoiseModel()
-    for qubit, population in idle.items():
-        model.set_idle_noise(qubit, 1.0, 2.0, population)
     for qubit, (p10, p01) in readout.items():
         model.set_readout_error(qubit, p10, p01)
     return model

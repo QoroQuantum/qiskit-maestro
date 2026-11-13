@@ -176,14 +176,18 @@ today; none of these are hidden from users.
     API exposes them (`"noiseless"` on gates, `"kraus"` instructions), but the
     Python bindings don't. Workaround: the plugin doesn't map Aer errors onto
     `NoiseModel` setters. It writes each error as a Pauli channel plus
-    amplitude damping and places them where Aer applies the error: a
-    `pauli_channel`, and on density matrix a `delay` under `set_idle_noise`
-    (T1 = 1, T2 = 2, the excited population), which Maestro applies as an
-    exact thermal channel. On pure-state methods the damping runs on an
-    ancilla (`cry`, `cx`, `reset`), because the sampled thermal noise
-    approximates T2 > T1 by T2 = T1 (with a `RuntimeWarning`). Coherent errors
-    and general Kraus channels raise. Ask: `noiseless=` on every gate method,
-    and `kraus_channel(qubits, operators)` on `QuantumCircuit`.
+    amplitude damping and places them where Aer applies the error.
+    **Answered after 0.3.14:** `maestro.QuantumChannel` (`pauli`,
+    `thermal_relaxation`, `unitary_mixture`, `from_kraus`, composed with
+    `then`) and `QuantumCircuit.channel(qubits, channel)`. The density matrix
+    applies a channel exactly, and the CPU statevector and matrix product
+    state sample it from their state on every execution, so the plugin emits
+    one shared channel per Aer error there: no `delay` under `set_idle_noise`,
+    no ancilla, and coherent and general Kraus errors run. The other methods
+    and the GPU hold no channels, so there the plugin still emits a
+    `pauli_channel` and runs the damping on an ancilla (`cry`, `cx`, `reset`),
+    and errors with no such form raise. Still open: `noiseless=` on every gate
+    method.
 12. **Noisy expectation values simulate every qubit.** With a channel in the
     circuit, `noisy_estimate_montecarlo` skips the causal-cone reduction, so a
     3-qubit circuit transpiled for a 127-qubit device didn't finish in

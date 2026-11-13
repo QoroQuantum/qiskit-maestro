@@ -29,11 +29,13 @@
 
 ## What isn't supported yet
 
-- **Some noise.** Coherent (unitary) errors, general Kraus channels, errors on
-  three or more qubits, correlated readout errors on several qubits, and Aer's
-  nonlocal errors raise `UnsupportedNoiseError`. So does noise on a circuit
-  with classical control, other than readout errors, and noise in
-  `run_evolution`. Relaxation can't run on the stabilizer method.
+- **Some noise.** Errors on three or more qubits, correlated readout errors on
+  several qubits, and Aer's nonlocal errors raise `UnsupportedNoiseError`. So
+  do coherent (unitary) errors and general Kraus channels on the GPU and on
+  methods other than `density_matrix`, `statevector` and
+  `matrix_product_state`. So does noise on a circuit with classical control,
+  other than readout errors, and noise in `run_evolution`. Relaxation can't
+  run on the stabilizer method.
 - **Some classical control.** `while_loop`, `break`, `continue`, and classical
   expressions beyond "bit is set" and "register equals value" aren't supported.
   Casts are read as Qiskit does: a cast to a narrower `Uint` keeps the low bits.

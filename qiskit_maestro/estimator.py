@@ -245,7 +245,7 @@ class MaestroEstimator(BaseEstimatorV2):
         for pub in coerced:
             circuit = convert(pub.circuit, estimator=True, noise=translator)
             method = resolve_method(self._options, circuit, _execution.NOISE_TRAJECTORIES, noisy)
-            converted.append(circuit.with_noise(translator, method))
+            converted.append(circuit.with_noise(translator, method, self._options["device"]))
             options.append({**self._options, "method": method})
         validate_combination(self._options, local=self._service is None)
         if self._service is not None:
