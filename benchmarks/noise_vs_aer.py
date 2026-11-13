@@ -287,14 +287,22 @@ def _describe(distribution: str, module) -> str:
     try:
         # Only when the package's own files are tracked there, not a checkout it merely sits in.
         tracked = subprocess.run(
-            [*git, "ls-files", "--error-unmatch", "__init__.py"], capture_output=True, timeout=10
+            [*git, "ls-files", "--error-unmatch", "__init__.py"],
+            check=False,
+            capture_output=True,
+            timeout=10,
         )
         if tracked.returncode == 0:
             commit = subprocess.run(
-                [*git, "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=10
+                [*git, "rev-parse", "--short", "HEAD"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             changed = subprocess.run(
                 [*git, "status", "--porcelain", "--untracked-files=no"],
+                check=False,
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -384,7 +392,9 @@ def main() -> None:
                 if not args.skip_maestro:
                     backend = MaestroBackend(method=method, noise_model=model, **options)
                     mine, last = _timed(
-                        lambda: _run(backend, measured, args.shots),
+                        lambda backend=backend, measured=measured: _run(
+                            backend, measured, args.shots
+                        ),
                         args.repeats,
                         args.settle,
                         not args.no_warm_up,
@@ -396,7 +406,7 @@ def main() -> None:
                 if not args.skip_aer:
                     aer = AerSimulator(method=method, noise_model=model, **options)
                     theirs, last = _timed(
-                        lambda: _run(aer, measured, args.shots),
+                        lambda aer=aer, measured=measured: _run(aer, measured, args.shots),
                         args.repeats,
                         args.settle,
                         not args.no_warm_up,
@@ -412,14 +422,27 @@ def main() -> None:
                     flush=True,
                 )
                 if args.json:
-                    record = dict(
-                        method=method, n=n, noise=kind, layout=args.layout, depth=args.depth,
-                        seed=args.seed, ops=ops, shots=args.shots, repeats=args.repeats,
-                        max_bond_dimension=options.get("matrix_product_state_max_bond_dimension"),
-                        device=device.name, maestro_s=mine, aer_s=theirs,
-                        maestro_realization_workers=workers, check=checked,
-                        truncation_error=errors, environment=setup,
-                    )  # fmt: skip
+                    record = {
+                        "method": method,
+                        "n": n,
+                        "noise": kind,
+                        "layout": args.layout,
+                        "depth": args.depth,
+                        "seed": args.seed,
+                        "ops": ops,
+                        "shots": args.shots,
+                        "repeats": args.repeats,
+                        "max_bond_dimension": options.get(
+                            "matrix_product_state_max_bond_dimension"
+                        ),
+                        "device": device.name,
+                        "maestro_s": mine,
+                        "aer_s": theirs,
+                        "maestro_realization_workers": workers,
+                        "check": checked,
+                        "truncation_error": errors,
+                        "environment": setup,
+                    }
                     with open(args.json, "a", encoding="utf-8") as out:
                         out.write(json.dumps(record) + "\n")
 
