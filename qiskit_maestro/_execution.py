@@ -69,9 +69,9 @@ def _strip_counts(result: Mapping[str, Any]) -> dict[str, Any]:
 def runs_own_workers(circuit: ConvertedCircuit) -> bool:
     """Whether Maestro spreads each of the circuit's calls over its own workers.
 
-    Sampled noise runs one noise realization per shot, and Maestro runs the
-    realizations of a call in parallel. Running such calls on threads too would
-    oversubscribe the CPU, so their callers run them one at a time.
+    Sampled noise draws its noise anew for every shot, and Maestro runs the shots
+    of a call in parallel. Running such calls on threads too would oversubscribe
+    the CPU, so their callers run them one at a time.
     """
     return circuit.noise is not None and circuit.noise.stochastic
 
@@ -92,9 +92,12 @@ def sample(
         if noise is None or not (noise.active or noise.readout):
             result = maestro_circuit.execute(config=config, shots=shots)
         elif noise.stochastic:
-            # A fresh noise draw for every shot, as in Aer's trajectories. With
-            # return_samples, Maestro samples each realization directly even when
-            # seeded; with counts, seeded calls take a slower path.
+            # A fresh noise draw for every shot, as in Aer's trajectories: one noise
+            # realization per shot. Where the simulator samples the circuit's channels
+            # from its state, every realization is the same circuit, and Maestro runs it
+            # once per shot without building the others. With return_samples, Maestro
+            # samples each realization directly even when seeded; with counts, seeded
+            # calls take a slower path.
             result = maestro_circuit.noisy_execute(
                 noise.maestro_model(),
                 config=config,
@@ -254,7 +257,11 @@ _MAX_Z_PROBABILITY_QUBITS = 12
 
 
 def _one_trajectory(ops: list, rng: np.random.Generator) -> list:
-    """The ops with each Pauli channel replaced by one Pauli drawn from it."""
+    """The ops with each Pauli channel replaced by one Pauli drawn from it.
+
+    Channel ops stay: the statevector and the matrix product state draw one
+    branch of each from their state as they run.
+    """
     out = []
     for op in ops:
         if op.kind != "pauli_channel":
@@ -274,9 +281,10 @@ def _statevector(circuit: ConvertedCircuit, save: Save, row, options, seed) -> n
     """The statevector at the save, padded to the circuit's width and with its global phase.
 
     After noise or a reset the state is random. Aer then saves the state of one
-    random trajectory, so this does too: each Pauli channel is drawn once, and
-    Maestro picks one outcome for each reset, including those of the ancilla
-    that applies amplitude damping.
+    random trajectory, so this does too: Maestro draws one branch of each
+    channel and one outcome for each reset. On the GPU, each Pauli channel is
+    drawn here, and the resets include those of the ancilla that applies
+    amplitude damping.
     """
     method = options["method"]
     if method not in _STATEVECTOR_METHODS:
@@ -294,8 +302,9 @@ def _statevector(circuit: ConvertedCircuit, save: Save, row, options, seed) -> n
         dtype=complex,
     )
     # Maestro's width is the highest qubit an operation touches, plus one; the
-    # untouched qubits above it are |0>, the high bits of the index. The noise
-    # ancilla, above the circuit's qubits, is reset to |0> after every use.
+    # untouched qubits above it are |0>, the high bits of the index. A noise ancilla,
+    # where the method needs one, is above the circuit's qubits and reset to |0> after
+    # every use.
     if len(vector) < 2**n:
         vector = np.concatenate([vector, np.zeros(2**n - len(vector), dtype=complex)])
     vector = vector[: 2**n]

@@ -228,6 +228,318 @@ def test_translations_are_reused_across_runs_and_follow_model_changes():
     assert key not in _TRANSLATIONS
 
 
+# ---- One Maestro channel per error ---------------------------------------------------
+
+
+def _thermal_errors():
+    """Errors that relax towards a thermal state, with each qubit's excited population."""
+    hot, warm = 0.2, 0.08
+    one = thermal_relaxation_error(50e-6, 70e-6, 3e-6, hot)
+    two = thermal_relaxation_error(50e-6, 70e-6, 6e-6, hot).expand(
+        thermal_relaxation_error(40e-6, 30e-6, 6e-6, warm)
+    )
+    return [
+        (one, (hot,)),
+        (depolarizing_error(0.05, 1).compose(one), (hot,)),
+        (depolarizing_error(0.04, 2).compose(two), (hot, warm)),  # expand puts warm on qubit 1.
+    ]
+
+
+def test_maestro_channels_reproduce_aer():
+    """The channel object Maestro runs has Aer's Pauli transfer matrix, part by part."""
+    from qiskit_maestro.noise import _kraus_ptm, structured_channel
+
+    cases = [(build(), None) for build in _STANDARD_ERRORS] + _thermal_errors()
+    for error, excited in cases:
+        n = error.num_qubits
+        excited = excited or (0.0,) * n
+        translated = decompose(_ptm(error), excited)
+        assert not isinstance(translated, str), translated
+        channel = structured_channel(translated, excited)
+        assert channel.num_qubits == n
+        np.testing.assert_allclose(
+            _kraus_ptm(np.asarray(channel.kraus_operators)).real, _ptm(error), atol=1e-12
+        )
+        # The Pauli part first, then one relaxation per damped qubit.
+        kinds = [factor["kind"] for factor in channel.factors]
+        expected = ["pauli"] * (translated.paulis is not None) + ["thermal"] * len(
+            translated.decays
+        )
+        assert kinds == (expected or ["pauli"])
+        damped = [factor for factor in channel.factors if factor["kind"] == "thermal"]
+        assert [factor["qubits"] for factor in damped] == [[k] for k, _ in translated.decays]
+        for factor, (k, a) in zip(damped, translated.decays):
+            assert factor["decay"] == pytest.approx(1 - a, abs=1e-14)
+            assert factor["excited_population"] == excited[k]
+        assert channel.is_state_independent == (not translated.decays)
+
+
+def _translated(circuit, model, method, device="CPU"):
+    from qiskit_maestro.converter import convert
+    from qiskit_maestro.noise import NoiseTranslator
+
+    translator = NoiseTranslator(model)
+    converted = convert(circuit, noise=translator)
+    return converted, converted.with_noise(translator, method, device)
+
+
+@pytest.mark.parametrize("method", ["statevector", "matrix_product_state", "density_matrix"])
+def test_each_error_becomes_one_shared_channel(method):
+    """No error is dropped, repeated or moved, and none needs a qubit of its own."""
+    circuit = _circuit(measure=True)
+    converted, noisy = _translated(circuit, _strong_noise_model(), method)
+    # Ten noisy gates and three measurements; the two rz gates have no error.
+    assert sum(op.kind == "noise" for op in converted.ops) == 13
+    # A channel exactly where Aer has an error, on the error's qubits, and nothing else added.
+    assert [op.kind for op in noisy.ops] == [
+        "channel" if op.kind == "noise" else op.kind for op in converted.ops
+    ]
+    assert [op.qubits for op in noisy.ops] == [op.qubits for op in converted.ops]
+    assert noisy.ancilla is None
+    assert noisy.num_qubits == circuit.num_qubits
+    assert noisy.build(np.zeros(0)).num_qubits == circuit.num_qubits
+    assert noisy.noise.family == ("exact" if method == "density_matrix" else "channel")
+    assert noisy.noise.stochastic == (method != "density_matrix")
+    # Instructions with the same Aer error share one channel object: the model has one
+    # error for both h gates and one for the three measurements, and eight others here.
+    channels = [op.channel for op in noisy.ops if op.kind == "channel"]
+    assert all(op.channel.num_qubits == len(op.qubits) for op in noisy.ops if op.kind == "channel")
+    assert len(channels) == 13 and len({id(channel) for channel in channels}) == 10
+    measured = [
+        before.channel for before, op in zip(noisy.ops, noisy.ops[1:]) if op.kind == "measure"
+    ]
+    assert len(measured) == 3 and measured[0] is measured[1] is measured[2]
+    # Only channel ops carry a channel: the record of every other instruction stays as
+    # small as in a noiseless circuit, where it is built once per instruction.
+    assert all(not hasattr(op, "channel") for op in noisy.ops if op.kind != "channel")
+    # A new translator for the same model hands out the same objects; another model doesn't.
+    model = _strong_noise_model()
+    first, second = (
+        [op.channel for op in _translated(circuit, model, method)[1].ops if op.kind == "channel"]
+        for _ in range(2)
+    )
+    assert len(first) == 13 and all(a is b for a, b in zip(first, second))
+    assert not {id(channel) for channel in channels} & {id(channel) for channel in first}
+
+
+@pytest.mark.parametrize(
+    "method,device",
+    [
+        ("tensor_network", "CPU"),
+        ("extended_stabilizer", "CPU"),
+        ("pauli_propagation", "CPU"),
+        ("statevector", "GPU"),
+        ("matrix_product_state", "GPU"),
+    ],
+)
+def test_methods_that_hold_no_channels_use_an_ancilla(method, device):
+    circuit = _circuit(measure=True)
+    _, noisy = _translated(circuit, _strong_noise_model(), method, device)
+    kinds = {op.kind for op in noisy.ops}
+    assert "channel" not in kinds and "pauli_channel" in kinds
+    assert noisy.ancilla == circuit.num_qubits
+    assert noisy.noise.family == "sampled" and noisy.noise.stochastic
+
+
+def test_an_error_that_does_nothing_adds_no_operation():
+    model = NoiseModel()
+    model.add_all_qubit_quantum_error(pauli_error([("I", 1.0)]), ["x"])
+    circuit = QuantumCircuit(1)
+    circuit.x(0)
+    circuit.measure_all()
+    for method in ("statevector", "density_matrix"):
+        _, noisy = _translated(circuit, model, method)
+        assert [op.kind for op in noisy.ops] == ["x", "measure"]
+        assert not noisy.noise.active
+
+
+@pytest.mark.parametrize("method", ["statevector", "matrix_product_state", "density_matrix"])
+def test_relaxation_towards_a_thermal_state_matches_aer(method):
+    """A device at a temperature excites idle qubits; pure states sample that from the state."""
+    device = GenericBackendV2(3, seed=5)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = NoiseModel.from_backend(device, temperature=120)
+    circuit = QuantumCircuit(3)
+    circuit.x(0)
+    circuit.sx(1)
+    circuit.cx(0, 1)
+    circuit.delay(40, 0, unit="us")
+    circuit.delay(300, 2, unit="us")  # Qubit 2 stays in |0> but for the temperature.
+    circuit.cx(1, 2)
+    exact = circuit.copy()
+    exact.save_probabilities()
+    aer = AerSimulator(noise_model=model, method="density_matrix").run(exact).result()
+    probabilities = aer.data(0)["probabilities"]
+    cold = AerSimulator(
+        noise_model=NoiseModel.from_backend(device, temperature=0), method="density_matrix"
+    )
+    assert np.max(np.abs(probabilities - cold.run(exact).result().data(0)["probabilities"])) > 0.03
+    circuit.measure_all()
+    _, noisy = _translated(circuit, model, method)
+    populations = {
+        factor["excited_population"]
+        for op in noisy.ops
+        if op.kind == "channel"
+        for factor in op.channel.factors
+        if factor["kind"] == "thermal"
+    }
+    assert min(populations) > 0.05
+    shots = 20000
+    counts = MaestroBackend(noise_model=model, method=method, seed_simulator=7).run(
+        circuit, shots=shots
+    )
+    from .conftest import assert_matches_probabilities
+
+    assert_matches_probabilities(
+        counts.result().get_counts(),
+        {format(i, "03b"): float(p) for i, p in enumerate(probabilities)},
+    )
+
+
+# ---- Errors with no Pauli and damping parts -------------------------------------------
+
+
+def test_general_channels_reproduce_aer():
+    """Coherent errors, unitary mixtures and Kraus channels, from Aer's description of them."""
+    from qiskit_maestro.noise import _kraus_ptm, general_channel
+
+    excited = reset_error(0.05, 0.3)  # Mostly towards |1>: no damping towards |0> gives that.
+    errors = _unusual_errors() + [
+        excited,
+        thermal_relaxation_error(5e-5, 8e-5, 9e-6).expand(excited),
+    ]
+    mixtures = 0
+    for error in errors[:3] + errors[-2:]:
+        assert isinstance(decompose(_ptm(error), (0.0,) * error.num_qubits), str)
+    for error in errors:
+        channel = general_channel(error)
+        assert channel is not None and channel.num_qubits == error.num_qubits
+        np.testing.assert_allclose(
+            _kraus_ptm(np.asarray(channel.kraus_operators)).real, _ptm(error), atol=1e-10
+        )
+        # An error made of unitary circuits is drawn without reading the state.
+        unitary = all(
+            instruction.operation.name not in ("kraus", "reset")
+            for circuit in error.circuits
+            for instruction in circuit.data
+        )
+        assert channel.is_state_independent or not unitary
+        mixtures += unitary
+    assert 0 < mixtures < len(errors)
+    # A reset isn't: its Kraus operators are sampled from the state.
+    assert [factor["kind"] for factor in general_channel(excited).factors] == ["kraus"]
+    assert not general_channel(excited).is_state_independent
+
+
+def _general_noise_model() -> NoiseModel:
+    """Strong errors of the kinds that are no Pauli channel with damping."""
+    from qiskit.circuit.library import CXGate, RXGate, RZZGate
+
+    model = NoiseModel(basis_gates=_BASIS)
+    model.add_all_qubit_quantum_error(coherent_unitary_error(RXGate(0.4).to_matrix()), ["sx", "x"])
+    model.add_all_qubit_quantum_error(reset_error(0.05, 0.3), ["h"])  # Mostly towards |1>.
+    model.add_all_qubit_quantum_error(QuantumError([(CXGate(), 0.2), (RZZGate(0.5), 0.8)]), ["cx"])
+    # A two-qubit Kraus channel, on neighbours and on the ends of the register.
+    relax = thermal_relaxation_error(5e-5, 8e-5, 9e-6).expand(reset_error(0.05, 0.3))
+    for pair in ((1, 2), (0, 2)):
+        model.add_quantum_error(relax, ["cx"], pair)
+    return model
+
+
+def _general_circuit(*, measure: bool) -> QuantumCircuit:
+    circuit = _circuit(measure=False)
+    circuit.cx(0, 2)
+    circuit.sx(1)
+    circuit.cx(2, 0)
+    if measure:
+        circuit.measure_all()
+    return circuit
+
+
+def test_general_errors_match_aer_exactly_on_the_density_matrix():
+    model = _general_noise_model()
+    circuit = _saves(_general_circuit(measure=False))
+    aer = AerSimulator(noise_model=model, method="density_matrix").run(circuit).result().data(0)
+    data = MaestroBackend(noise_model=model, method="density_matrix").run(circuit).result().data(0)
+    for label in ("p", "p20"):
+        np.testing.assert_allclose(data[label], aer[label], atol=1e-10)
+    assert data["e"] == pytest.approx(aer["e"], abs=1e-10)
+    ideal = MaestroBackend(method="density_matrix").run(circuit).result().data(0)
+    assert np.max(np.abs(ideal["p"] - aer["p"])) > 0.05
+
+
+@pytest.mark.parametrize("method", ["statevector", "matrix_product_state"])
+def test_general_errors_are_sampled_from_the_state(method):
+    model = _general_noise_model()
+    exact = _general_circuit(measure=False)
+    exact.save_probabilities()
+    aer = AerSimulator(noise_model=model, method="density_matrix").run(exact).result()
+    circuit = _general_circuit(measure=True)
+    _, noisy = _translated(circuit, model, method)
+    assert noisy.ancilla is None and noisy.noise.stochastic
+    kinds = {f["kind"] for op in noisy.ops if op.kind == "channel" for f in op.channel.factors}
+    assert kinds == {"unitary_mixture", "kraus"}
+    counts = MaestroBackend(noise_model=model, method=method, seed_simulator=11).run(
+        circuit, shots=20000
+    )
+    from .conftest import assert_matches_probabilities
+
+    assert_matches_probabilities(
+        counts.result().get_counts(),
+        {format(i, "03b"): float(p) for i, p in enumerate(aer.data(0)["probabilities"])},
+    )
+
+
+@pytest.mark.parametrize("method", ["statevector", "matrix_product_state"])
+def test_a_coherent_error_alone_is_evolved_once(method):
+    """A coherent over-rotation is a channel with one branch, a unitary: nothing is drawn
+    for it, so the circuit is not stochastic and one evolution serves every shot."""
+    from qiskit.circuit.library import RXGate
+
+    model = NoiseModel(basis_gates=_BASIS)
+    model.add_all_qubit_quantum_error(coherent_unitary_error(RXGate(0.4).to_matrix()), ["sx", "x"])
+    exact = _general_circuit(measure=False)
+    exact.save_probabilities()
+    aer = AerSimulator(noise_model=model, method="density_matrix").run(exact).result()
+    circuit = _general_circuit(measure=True)
+    _, noisy = _translated(circuit, model, method)
+    channels = [op.channel for op in noisy.ops if op.kind == "channel"]
+    assert channels and all(channel.is_deterministic for channel in channels)
+    assert noisy.noise.family == "channel" and not noisy.noise.stochastic
+    result = MaestroBackend(noise_model=model, method=method, seed_simulator=11).run(
+        circuit, shots=20000
+    )
+    from .conftest import assert_matches_probabilities
+
+    assert_matches_probabilities(
+        result.result().get_counts(),
+        {format(i, "03b"): float(p) for i, p in enumerate(aer.data(0)["probabilities"])},
+    )
+    # With an error that is drawn, every shot is a trajectory again.
+    _, drawn = _translated(circuit, _general_noise_model(), method)
+    assert drawn.noise.stochastic
+
+
+@pytest.mark.parametrize("method", ["statevector", "matrix_product_state"])
+def test_metadata_says_how_many_workers_ran_the_noise(method):
+    """Every shot of sampled noise is a realization, and Maestro spreads a call's
+    realizations over its own workers. How many it used is in the result's metadata,
+    beside the simulator and method that ran: a timing depends on it."""
+    from qiskit_maestro.options import run_info
+
+    circuit = _general_circuit(measure=True)
+    noisy = MaestroBackend(noise_model=_general_noise_model(), method=method)
+    info = noisy.run(circuit, shots=64).result().results[0].metadata["maestro"]
+    assert info["realization_workers"] >= 1
+    # Without noise there are no realizations.
+    ideal = MaestroBackend(method=method).run(circuit, shots=64).result()
+    assert "realization_workers" not in ideal.results[0].metadata["maestro"]
+    # Of several calls, the most any of them used.
+    calls = [{"simulator": 0, "method": 0, "realization_workers": w} for w in (2, 8, 4)]
+    assert run_info(calls + [{"simulator": 0, "method": 0}])["realization_workers"] == 8
+
+
 # ---- Exact agreement on the density matrix ------------------------------------------
 
 
@@ -565,7 +877,9 @@ def test_circuits_transpiled_for_a_large_device_drop_idle_qubits():
 # ---- Errors that can't be reproduced --------------------------------------------------
 
 
-def test_coherent_errors_raise_naming_the_instruction():
+@pytest.mark.parametrize("method", ["tensor_network", "stabilizer", "extended_stabilizer"])
+def test_coherent_errors_raise_naming_the_instruction(method):
+    """The methods that hold no channels can't apply an error with no Pauli and damping parts."""
     from qiskit.circuit.library import RXGate
 
     model = NoiseModel()
@@ -573,8 +887,10 @@ def test_coherent_errors_raise_naming_the_instruction():
     circuit = QuantumCircuit(2)
     circuit.sx(1)
     circuit.measure_all()
-    with pytest.raises(UnsupportedNoiseError, match=r"'sx'.*qubits \[1\].*coherent") as error:
-        MaestroBackend(noise_model=model).run(circuit)
+    with pytest.raises(
+        UnsupportedNoiseError, match=r"'sx'.*qubits \[1\].*coherent.*method='statevector'"
+    ) as error:
+        MaestroBackend(noise_model=model, method=method).run(circuit)
     assert error.value.instruction == "sx"
     assert error.value.qubits == (1,)
     assert isinstance(error.value, UnsupportedInstructionError)
