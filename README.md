@@ -75,7 +75,7 @@ Add `device="GPU"` to run on Qoro's GPU cluster.
 [examples/qoro_cloud.py](https://github.com/QoroQuantum/qiskit-maestro/blob/main/examples/qoro_cloud.py)
 runs all three on the cloud. A few features, such as noise models and classical
 control, run locally only for now: see the
-[guide](https://qoroquantum.github.io/qiskit-maestro/guide.html#qoro-cloud).
+[guide](https://qoroquantum.github.io/qiskit-maestro/guide/gpu_and_cloud.html#not-on-the-cloud-yet).
 
 ## Pick a simulation method
 
@@ -103,7 +103,7 @@ estimator = MaestroEstimator(
 
 Pass an Aer `NoiseModel` as `noise_model=`, and `device="GPU"` for your own GPU
 ([get GPU access](https://qoroquantum.github.io/maestro/getting-started/gpu-access.html)).
-The [guide](https://qoroquantum.github.io/qiskit-maestro/guide.html#options)
+The [guide](https://qoroquantum.github.io/qiskit-maestro/guide/options.html)
 lists every method and option.
 
 <!-- end-docs -->

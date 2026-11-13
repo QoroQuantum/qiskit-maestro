@@ -4,14 +4,14 @@
 
 - Documentation at
   [qoroquantum.github.io/qiskit-maestro](https://qoroquantum.github.io/qiskit-maestro/),
-  built with Sphinx and the Qiskit ecosystem theme: the README, the guide, the
-  examples, an API reference generated from the docstrings, and this
+  built with Sphinx and the Qiskit ecosystem theme: the README, the guide (one
+  page per topic), the examples, an API reference generated from the docstrings, and this
   changelog. `pip install -e ".[docs]"` installs what it needs, and CI builds
   it on every push and publishes it from `main`. The package's Documentation
   link on PyPI now points there.
 - The README has the Qiskit Ecosystem badge.
 - Pauli propagation is documented: a row in the README's method table, and a
-  section of the guide on setting it up with `MaestroEstimator`, choosing a
+  page of the guide on setting it up with `MaestroEstimator`, choosing a
   `pp_coefficient_threshold`, and running it on the GPU and the Qoro cloud.
 - Three new examples, simpler than the others:
   `examples/getting_started.py` (a Bell state on the backend, the Sampler

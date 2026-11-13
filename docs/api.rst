@@ -28,7 +28,7 @@ Qoro cloud jobs
 ---------------
 
 With ``service=``, ``run()`` returns one of these as soon as the job is
-submitted. The Qoro cloud section of the :doc:`guide` lists what runs there.
+submitted. The guide's :doc:`guide/gpu_and_cloud` page lists what runs there.
 
 .. autoclass:: QoroCloudJob
    :members: result, status, cancel, job_id
