@@ -1,7 +1,8 @@
 # Guide
 
-How each Qiskit and Aer interface maps over, every option, noise models, time
-evolution, the GPU, the Qoro cloud, and what isn't supported yet. Runnable
+How each Qiskit and Aer interface maps over, every option, Pauli propagation,
+noise models, time evolution, the GPU, the Qoro cloud, and what isn't
+supported yet. Runnable
 scripts are in [Examples](examples/index.md), and every class and method is in
 the [API reference](api.rst).
 
@@ -65,7 +66,7 @@ estimator = MaestroEstimator(
 
 | Option | Values | Default |
 |---|---|---|
-| `method` | `"statevector"`, `"matrix_product_state"` (`"mps"`), `"stabilizer"`, `"extended_stabilizer"`, `"density_matrix"`, `"tensor_network"`, `"pauli_propagation"`, `"automatic"` | `"statevector"` |
+| `method` | `"statevector"`, `"matrix_product_state"` (`"mps"`), `"stabilizer"`, `"extended_stabilizer"`, `"density_matrix"`, `"tensor_network"`, `"pauli_propagation"` (see [Pauli propagation](#pauli-propagation)), `"automatic"` | `"statevector"` |
 | `device` | `"CPU"`, `"GPU"` | `"CPU"` |
 | `precision` | `"double"`, `"single"` | `"double"` |
 | `seed_simulator` (`seed` on the primitives) | integer | random |
@@ -84,6 +85,52 @@ of its n active qubits, as on Aer.
 Maestro picks the fastest engine for a circuit by itself, so it may run a
 Clifford circuit you sent to `"statevector"` on the stabilizer engine. Results
 are unaffected, and each result's metadata records what actually ran.
+[The simulation methods example](examples/simulation_methods.md) runs one
+circuit on three methods.
+
+## Pauli propagation
+
+`method="pauli_propagation"` computes expectation values by running the
+circuit backwards on the observable, a sum of Pauli strings, instead of
+forwards on the state. A Clifford gate maps each string to one string, and a
+rotation can split it in two. The cost depends mostly on how many strings
+there are, not on how many qubits, so it reaches circuits too wide for a
+statevector, including lattices an MPS handles badly, such as the heavy-hex
+layout of IBM's devices. Use it with `MaestroEstimator`:
+
+```python
+from qiskit_maestro import MaestroEstimator
+
+estimator = MaestroEstimator(
+    method="pauli_propagation",
+    maestro_options={"pp_coefficient_threshold": 1e-4},
+)
+evs = estimator.run([(circuit, observables)]).result()[0].data.evs
+```
+
+With no threshold, every string is kept and the values are exact, but the
+number of strings can grow exponentially with depth. For deep circuits, set
+`pp_coefficient_threshold`: strings whose coefficients fall below it are
+dropped. A smaller threshold is more accurate and slower, so lower it until
+the values stop changing. `stds` doesn't include the truncation error.
+
+These [`maestro.SimulatorConfig`](https://qoroquantum.github.io/maestro/api/configuration.html)
+fields tune the truncation. Pass them in `maestro_options`:
+
+| Field | Effect |
+|---|---|
+| `pp_coefficient_threshold` | Drop strings whose coefficient is at most this, in magnitude |
+| `pp_max_pauli_weight` | Drop strings that act on more qubits than this |
+| `pp_gates_between_trims` | Apply the two limits every this many gates. `1` trims after every gate, as IBM's `pauli-prop` does |
+
+Pauli propagation runs on the GPU with `device="GPU"`, and on the Qoro cloud
+with `service=`, on its CPUs or GPUs, with the same `maestro_options`. Noise
+models work with it too. [The Pauli propagation example](examples/pauli_propagation.md)
+runs the kicked Ising circuit of IBM's utility experiment on the 115-qubit
+heavy-hex lattice, exactly and at three thresholds.
+`benchmarks/pauli_propagation.py` compares accuracy against time with IBM's
+[`pauli-prop`](https://github.com/Qiskit/pauli-prop), as in
+[Maestro's benchmarks](https://qoroquantum.github.io/maestro/benchmarks.html#pauli-propagation).
 
 ## Noise models
 

@@ -89,7 +89,17 @@ backend = MaestroBackend(method="mps", max_bond_dimension=64)
 | `"mps"` | many qubits with limited entanglement |
 | `"stabilizer"` | Clifford circuits, any size |
 | `"density_matrix"` | small noisy circuits, exact |
+| `"pauli_propagation"` | expectation values on wide circuits, by evolving the observable |
 | `"automatic"` | let Maestro pick, as Aer does |
+
+Pauli propagation runs on `MaestroEstimator`. For deep circuits, give it a
+threshold below which Pauli terms are dropped:
+
+```python
+estimator = MaestroEstimator(
+    method="pauli_propagation", maestro_options={"pp_coefficient_threshold": 1e-4}
+)
+```
 
 Pass an Aer `NoiseModel` as `noise_model=`, and `device="GPU"` for your own GPU
 ([get GPU access](https://qoroquantum.github.io/maestro/getting-started/gpu-access.html)).
@@ -102,11 +112,16 @@ lists every method and option.
 
 - [Documentation](https://qoroquantum.github.io/qiskit-maestro/):
   - [Guide](https://qoroquantum.github.io/qiskit-maestro/guide.html): every
-    option, noise models, time evolution, the cloud in detail, and what isn't
-    supported yet.
-  - [Examples](https://qoroquantum.github.io/qiskit-maestro/examples/): a
-    two-line Aer noise-model port, a VQE loop on MPS, time evolution, and the
-    cloud.
+    option, Pauli propagation, noise models, time evolution, the cloud in
+    detail, and what isn't supported yet.
+  - [Examples](https://qoroquantum.github.io/qiskit-maestro/examples/): a Bell
+    state on the backend, Sampler and Estimator, one circuit on three
+    simulation methods, Pauli propagation on 115 qubits, a two-line Aer
+    noise-model port, a VQE loop on MPS, time evolution, and the cloud.
+- [Benchmarks](https://github.com/QoroQuantum/qiskit-maestro/tree/main/benchmarks):
+  MPS expectation values against Aer, and Pauli propagation against IBM's
+  `pauli-prop`. [Maestro's benchmarks](https://qoroquantum.github.io/maestro/benchmarks.html)
+  have the full results.
   - [API reference](https://qoroquantum.github.io/qiskit-maestro/api.html).
 - [Maestro docs](https://qoroquantum.github.io/maestro/), including
   [Coming from Qiskit Aer](https://qoroquantum.github.io/maestro/getting-started/coming-from-qiskit.html).

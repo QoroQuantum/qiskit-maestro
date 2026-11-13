@@ -10,6 +10,18 @@
   it on every push and publishes it from `main`. The package's Documentation
   link on PyPI now points there.
 - The README has the Qiskit Ecosystem badge.
+- Pauli propagation is documented: a row in the README's method table, and a
+  section of the guide on setting it up with `MaestroEstimator`, choosing a
+  `pp_coefficient_threshold`, and running it on the GPU and the Qoro cloud.
+- Three new examples, simpler than the others:
+  `examples/getting_started.py` (a Bell state on the backend, the Sampler
+  and the Estimator), `examples/simulation_methods.py` (one GHZ circuit on
+  the statevector, MPS and stabilizer methods, from 20 to 1,000 qubits) and
+  `examples/pauli_propagation.py` (the kicked Ising circuit on IBM's
+  115-qubit heavy-hex lattice). The test suite runs all three.
+- `benchmarks/pauli_propagation.py`, a short version of the Pauli propagation
+  benchmark in Maestro's documentation: accuracy against time for
+  `MaestroEstimator` and IBM's `pauli-prop` on a kicked Ising chain.
 
 ## [0.2.0]
 
