@@ -69,6 +69,7 @@ intersphinx_mapping = {
 
 html_theme = "qiskit-ecosystem"
 html_title = f"{project} {release}"
+html_favicon = "_static/favicon.ico"
 html_theme_options = {"sidebar_qiskit_ecosystem_member": True}
 
 # GitHub renders README anchors client-side, so linkcheck can't see them.
