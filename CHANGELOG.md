@@ -43,8 +43,8 @@
   `UnsupportedNoiseError` before, and still do on the other methods. An error
   with a single unitary branch, such as a coherent over-rotation, is a gate: a
   circuit whose errors are all of that kind is evolved once for all its shots.
-- Requires the Maestro release that adds `QuantumChannel` and
-  `QuantumCircuit.channel` (after 0.3.14).
+- Requires `qoro-maestro` 0.3.15, which adds `QuantumChannel` and
+  `QuantumCircuit.channel`.
 - `benchmarks/noise_vs_aer.py` times `MaestroBackend` against `AerSimulator`
   under a fake IBM device's noise model, after checking that they agree: in
   the full distribution on the density matrix, and on the sampled methods in

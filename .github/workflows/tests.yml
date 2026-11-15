@@ -78,7 +78,7 @@ jobs:
             qiskit: "qiskit>=2.0,<3"
             extras: test,cloud
           # Every dependency at the lowest version pyproject.toml allows (Qiskit 1.1,
-          # Maestro 0.3.14, NumPy 1.23), so those floors stay true.
+          # Maestro 0.3.15, NumPy 1.23), so those floors stay true.
           - name: Python 3.10, oldest supported versions
             python: "3.10"
             lowest: true

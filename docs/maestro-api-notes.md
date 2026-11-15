@@ -177,7 +177,7 @@ today; none of these are hidden from users.
     Python bindings don't. Workaround: the plugin doesn't map Aer errors onto
     `NoiseModel` setters. It writes each error as a Pauli channel plus
     amplitude damping and places them where Aer applies the error.
-    **Answered after 0.3.14:** `maestro.QuantumChannel` (`pauli`,
+    **Answered in 0.3.15:** `maestro.QuantumChannel` (`pauli`,
     `thermal_relaxation`, `unitary_mixture`, `from_kraus`, composed with
     `then`) and `QuantumCircuit.channel(qubits, channel)`. The density matrix
     applies a channel exactly, and the CPU statevector and matrix product
