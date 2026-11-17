@@ -344,7 +344,10 @@ def _prepare(
     converted = convert(circuit, noise=translator, saves=True)
     noisy = translator is not None and translator.has_quantum_errors
     method = resolve_method(options, converted, shots, noisy)
-    return converted.with_noise(translator, method), {**options, "method": method}
+    return converted.with_noise(translator, method, options["device"]), {
+        **options,
+        "method": method,
+    }
 
 
 def _experiment(

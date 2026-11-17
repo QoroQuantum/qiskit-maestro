@@ -39,7 +39,9 @@ fields tune the truncation. Pass them in `maestro_options`:
 
 Pauli propagation runs on the GPU with `device="GPU"`, and on the Qoro cloud
 with `service=`, on its CPUs or GPUs, with the same `maestro_options`. Noise
-models work with it too. [The Pauli propagation example](../examples/pauli_propagation.md)
+models work with it too. On the CPU each Aer error is applied exactly as one
+channel, so a noisy estimate is a single run; relaxation adds terms, so keep a
+`pp_coefficient_threshold` on wide circuits. [The Pauli propagation example](../examples/pauli_propagation.md)
 runs the kicked Ising circuit of IBM's utility experiment on the 115-qubit
 heavy-hex lattice, exactly and at three thresholds.
 `benchmarks/pauli_propagation.py` compares accuracy against time with IBM's

@@ -35,10 +35,31 @@ small noisy circuits, as Aer does.
 
 ## Supported errors
 
-Depolarizing, Pauli, bit- and phase-flip, phase-damping, amplitude-damping,
-thermal-relaxation (any T2 ≤ 2·T1) and reset errors are supported, and so are
-their compositions on one or two qubits, which covers `from_backend`. Each
-translation is checked against Aer's channel. An error Maestro can't reproduce
-exactly raises `UnsupportedNoiseError` naming the instruction and qubits, and
-no noise is ever dropped. [Supported features](supported.md#what-isnt-supported-yet)
+Each Aer error becomes one Maestro channel. The density matrix applies it
+exactly, and so does Pauli propagation on the CPU, which applies the channel's
+adjoint to the observable: a noisy estimate is one exact run. The statevector
+and the matrix product state sample it from their own state on every shot, as
+Aer does, so a noisy circuit runs on its own qubits, with no ancilla. These
+four methods take every error on one or two qubits:
+depolarizing, Pauli, bit- and phase-flip, phase-damping, amplitude-damping,
+thermal-relaxation (any T2 ≤ 2·T1, at any temperature) and reset errors and
+their compositions, which covers `from_backend`, and also coherent errors,
+mixtures of unitaries and general Kraus channels.
+
+Channels need `qoro-maestro` 0.3.15 or later. With 0.3.14, which the `cloud`
+extra installs, noise takes its earlier form on every method: a Pauli channel,
+with the damping applied exactly as an idle-noise delay on the density matrix
+and through an ancilla qubit elsewhere, and coherent and general Kraus errors
+are refused.
+
+Exact relaxation on Pauli propagation sends `Z` towards the identity and so
+grows the propagated operator: on wide circuits set `pp_coefficient_threshold`
+(see [Pauli propagation](pauli_propagation.md)), as for noiseless ones.
+
+The other methods, and the GPU, sample the Pauli part of an error and apply its
+damping through an ancilla qubit, so they take the errors that are a Pauli
+channel followed by amplitude damping; the stabilizer takes Pauli errors only.
+Each translation is checked against Aer's channel. An error the method can't
+reproduce exactly raises `UnsupportedNoiseError` naming the instruction and
+qubits, and no noise is ever dropped. [Supported features](supported.md#what-isnt-supported-yet)
 lists the noise that isn't supported yet.

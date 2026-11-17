@@ -240,8 +240,10 @@ def test_run_evolution_matches_one_circuit_per_step():
 
 def test_run_evolution_with_an_empty_initial_state_and_mps():
     n = 10
+    # Exact parity with the statevector: Maestro 0.3.15 truncates an MPS at a discarded
+    # weight of 1e-15 by default, which moves these energies by about 2e-9 after 15 steps.
     result = (
-        MaestroEstimator(method="mps")
+        MaestroEstimator(method="mps", truncation_threshold=0.0)
         .run_evolution(QuantumCircuit(n), _step(n), _ising(n), range(0, 21, 5))
         .result()[0]
     )

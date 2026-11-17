@@ -134,8 +134,19 @@ jobs:
 
       - name: Test, measuring coverage
         if: ${{ matrix.coverage }}
-        # Fails below [tool.coverage.report] fail_under in pyproject.toml.
-        run: pytest -v -ra --cov --cov-report=term-missing
+        # The cloud extra's qoro-divi pins qoro-maestro 0.3.14, which has no noise
+        # channels, so their code is measured in the next step; the gate is there.
+        run: pytest -v -ra --cov --cov-report= --cov-fail-under=0
+
+      - name: Test the noise channels too, measuring coverage
+        if: ${{ matrix.coverage }}
+        # The newest qoro-maestro, over Divi's pin, for everything but the cloud tests,
+        # added to the coverage above. Fails below [tool.coverage.report] fail_under in
+        # pyproject.toml, for the two runs together.
+        run: |
+          uv pip install --system --upgrade "qoro-maestro>=0.3.15"
+          python -c "import maestro; assert hasattr(maestro, 'QuantumChannel')"
+          pytest -v -ra --ignore=tests/test_cloud.py --cov --cov-append --cov-report=term-missing
 
       - name: Coverage summary
         if: ${{ matrix.coverage && !cancelled() }}

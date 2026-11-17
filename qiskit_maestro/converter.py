@@ -16,7 +16,9 @@ Circuits sent to the Qoro cloud are written as OpenQASM 2.0, which it takes.
 
 With an Aer noise model, each instruction's errors become placeholder ``noise``
 operations where Aer applies them. :meth:`ConvertedCircuit.with_noise` replaces
-them with Maestro operations once the simulation method is known.
+them with Maestro operations once the simulation method is known: one channel
+per error on the methods that hold channels, a Pauli channel and an ancilla on
+the others.
 """
 
 from __future__ import annotations
@@ -43,9 +45,27 @@ from qiskit.circuit import library as lib
 from qiskit.circuit.classical import expr, types
 
 from .exceptions import UnsupportedInstructionError, UnsupportedNoiseError
-from .noise import maestro_noise_model
+from .noise import HAS_CHANNELS, maestro_noise_model
 
-__all__ = ["NATIVE_GATES", "SAVE_INSTRUCTIONS", "ConvertedCircuit", "NoiseSpec", "convert"]
+__all__ = [
+    "CHANNEL_METHODS",
+    "EXACT_CHANNEL_METHODS",
+    "NATIVE_GATES",
+    "SAVE_INSTRUCTIONS",
+    "ConvertedCircuit",
+    "NoiseSpec",
+    "convert",
+]
+
+# The pure-state methods whose CPU simulators hold noise channels and sample them from
+# their state, one branch per shot. The density matrix holds them too, and applies them
+# exactly.
+CHANNEL_METHODS = frozenset({"statevector", "matrix_product_state"})
+
+# The CPU methods that apply a channel exactly, so a noisy circuit runs once: the density
+# matrix, and Pauli propagation, which applies the channel's adjoint to the observable.
+# (The density matrix applies channels on every device.)
+EXACT_CHANNEL_METHODS = frozenset({"density_matrix", "pauli_propagation"})
 
 # Qiskit gate class -> the maestro.circuits.QuantumCircuit method that applies it.
 # Every pair was checked against Qiskit's matrix, global phase included. The
@@ -125,7 +145,8 @@ _Condition = tuple[tuple[int, bool], ...]
 @dataclass(frozen=True)
 class _Op:
     # A NATIVE_GATES method name, "measure", "reset", "if", "noise" (an Aer error to
-    # translate), "pauli_channel" or "delay" (a Maestro idle-noise delay).
+    # translate), "channel" (a maestro.QuantumChannel), "pauli_channel" or "delay" (a
+    # Maestro idle-noise delay, for damping on the density matrix without HAS_CHANNELS).
     kind: str
     qubits: tuple[int, ...] = ()
     angles: tuple[_Angle, ...] = ()
@@ -135,6 +156,14 @@ class _Op:
     false_body: tuple[_Op, ...] | None = None
     probabilities: tuple[float, ...] = ()
     noise: int = -1
+
+
+@dataclass(frozen=True)
+class _ChannelOp(_Op):
+    # A "channel" op with its maestro.QuantumChannel, shared by every op with the same
+    # error. A subclass, because _Op is built once per instruction of every circuit: a
+    # field for the channel there cost a noiseless run about 1%.
+    channel: object = None
 
 
 @dataclass(frozen=True)
@@ -156,20 +185,23 @@ class Save:
 class NoiseSpec:
     """How a circuit with translated noise runs.
 
-    ``stochastic`` circuits hold operations a pure-state simulation samples, so
-    they run one noise realization per shot. ``idle`` maps each qubit with
-    damping ``delay`` operations to its excited-state population.
+    ``family`` says what the noise operations are: ``"exact"`` for channels the
+    density matrix applies exactly, ``"channel"`` for channels a pure-state
+    simulator samples from its state, and ``"sampled"`` for Pauli channels and
+    ancilla damping. ``stochastic`` circuits hold operations a pure-state
+    simulation samples, so they run one noise realization per shot.
     """
 
     family: str
     stochastic: bool
     active: bool = False  # Whether the circuit holds any noise operation.
-    idle: tuple[tuple[int, float], ...] = ()
     readout: tuple[tuple[int, float, float], ...] = ()
+    # Without HAS_CHANNELS: each qubit with damping delays, and its excited-state population.
+    idle: tuple[tuple[int, float], ...] = ()
 
     def maestro_model(self, *, readout: bool = True) -> maestro.NoiseModel:
         return maestro_noise_model(
-            dict(self.idle), {q: (a, b) for q, a, b in self.readout} if readout else {}
+            {q: (a, b) for q, a, b in self.readout} if readout else {}, dict(self.idle)
         )
 
 
@@ -189,7 +221,7 @@ class ConvertedCircuit:
     # it, kept only for circuits that save their statevector.
     phases: list[_Angle] = field(default_factory=list)
     noise: NoiseSpec | None = None
-    # The qubit pure-state noise uses as an ancilla, or None.
+    # The qubit that damping uses as an ancilla on the methods that hold no channels, or None.
     ancilla: int | None = None
     # After with_noise drops idle qubits: the original index of each qubit left.
     qubit_map: tuple[int, ...] | None = None
@@ -325,8 +357,19 @@ class ConvertedCircuit:
         """The Maestro circuit for one row of angles, through QASM if it has classical control."""
         return self.to_maestro_qasm(angles) if self.has_control_flow else self.to_maestro(angles)
 
-    def with_noise(self, translator, method: str) -> ConvertedCircuit:
+    def with_noise(self, translator, method: str, device: str = "CPU") -> ConvertedCircuit:
         """Translate the circuit's Aer errors for ``method`` and attach the readout errors.
+
+        Each error becomes one channel operation on the density matrix and on
+        CPU Pauli propagation, which apply it exactly, and on the CPU statevector
+        and matrix product state, which sample it from their state on the
+        circuit's own qubits. The other
+        methods, and the GPU, hold no channels: there the Pauli part is a
+        ``pauli_channel`` and the damping an exact rotation into an ancilla, and
+        an error with no such parts is rejected. With a qoro-maestro older than
+        0.3.15 (no :data:`~qiskit_maestro.noise.HAS_CHANNELS`) every method takes
+        that form, except the density matrix, which applies the damping exactly
+        as an idle-noise ``delay``.
 
         Returns a copy whose ``noise`` says how to run it. A circuit converted
         without a noise model is returned unchanged.
@@ -337,7 +380,15 @@ class ConvertedCircuit:
         """
         if translator is None:
             return self
-        family = "exact" if method == "density_matrix" else "sampled"
+        channels = HAS_CHANNELS
+        if method == "density_matrix" or (
+            channels and method in EXACT_CHANNEL_METHODS and device == "CPU"
+        ):
+            family = "exact"
+        elif channels and method in CHANNEL_METHODS and device == "CPU":
+            family = "channel"
+        else:
+            family = "sampled"
         ancilla = self.num_qubits
         idle: dict[int, float] = {}
         stochastic = False
@@ -347,6 +398,15 @@ class ConvertedCircuit:
             if op.kind != "noise":
                 return [op]
             name, qubits = translator.describe(op.noise)
+            if family != "sampled" and channels:
+                built = translator.maestro_channel(op.noise)
+                if built is None:
+                    return []
+                # A sampled channel is drawn anew for every shot, except one with a single
+                # branch, such as a coherent over-rotation: that is a gate, and Maestro
+                # evolves the circuit once for all the shots.
+                stochastic = stochastic or (family == "channel" and not built.is_deterministic)
+                return [_ChannelOp("channel", op.qubits, channel=built)]
             channel = translator.channel(op.noise, family)
             out = []
             if channel.paulis is not None:
@@ -355,6 +415,7 @@ class ConvertedCircuit:
             for k, a in channel.decays:
                 qubit = op.qubits[k]
                 if family == "exact":
+                    # The density matrix without channels: exact relaxation under idle noise.
                     idle[qubit] = translator.excited_population(qubit)
                     out.append(_Op("delay", (qubit,), angles=(-math.log(a),)))
                     continue
@@ -412,9 +473,10 @@ class ConvertedCircuit:
         noise = NoiseSpec(
             family=family,
             stochastic=stochastic,
-            active=uses_ancilla or any(op.kind in ("pauli_channel", "delay") for op in _walk(ops)),
-            idle=tuple(sorted(idle.items())),
+            active=uses_ancilla
+            or any(op.kind in ("channel", "pauli_channel", "delay") for op in _walk(ops)),
             readout=tuple(readout),
+            idle=tuple(sorted(idle.items())),
         )
         # Drop the qubits nothing acts on, as Aer does. A transpiled circuit is as wide
         # as its device, and Maestro would otherwise simulate every qubit of a noisy
@@ -428,8 +490,8 @@ class ConvertedCircuit:
         index[ancilla] = len(keep)
         noise = dataclasses.replace(
             noise,
-            idle=tuple((index[q], p) for q, p in noise.idle),
             readout=tuple((index[q], a, b) for q, a, b in noise.readout if q in index),
+            idle=tuple((index[q], p) for q, p in noise.idle),
         )
         return dataclasses.replace(
             self,
@@ -454,6 +516,8 @@ def _remap(op: _Op, index: dict[int, int]) -> _Op:
             if op.false_body is None
             else tuple(_remap(o, index) for o in op.false_body),
         )
+    if op.kind == "channel":
+        return _ChannelOp("channel", tuple(index[q] for q in op.qubits), channel=op.channel)
     # The constructor, as dataclasses.replace is several times slower on large circuits.
     return _Op(
         kind=op.kind,
@@ -490,6 +554,8 @@ def build_maestro(ops: list[_Op], angles: np.ndarray | None = None) -> MaestroCi
             circuit.measure([(op.qubits[0], op.clbits[0])])
         elif op.kind == "reset":
             circuit.reset(op.qubits[0])
+        elif op.kind == "channel":
+            circuit.channel(list(op.qubits), op.channel)
         elif op.kind == "pauli_channel":
             circuit.pauli_channel(list(op.qubits), list(op.probabilities))
         elif op.kind == "delay":
@@ -521,7 +587,7 @@ def _qasm(op: _Op, row: np.ndarray) -> str:
         if op.false_body is not None:
             text += f" else {{ {' '.join(_qasm(o, row) for o in op.false_body)} }}"
         return text
-    if op.kind in ("noise", "pauli_channel", "delay"):
+    if op.kind in ("noise", "channel", "pauli_channel", "delay"):
         raise RuntimeError("Noise operations can't be written as OpenQASM.")
     qubits = ", ".join(f"q[{q}]" for q in op.qubits)
     if not op.angles:

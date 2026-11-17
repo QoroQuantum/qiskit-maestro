@@ -161,7 +161,10 @@ class MaestroSampler(BaseSamplerV2):
         circuit = convert(pub.circuit, noise=translator)
         noisy = translator is not None and translator.has_quantum_errors
         method = resolve_method(self._options, circuit, pub.shots, noisy)
-        return circuit.with_noise(translator, method), {**self._options, "method": method}
+        return circuit.with_noise(translator, method, self._options["device"]), {
+            **self._options,
+            "method": method,
+        }
 
     def _run(self, pubs: list[SamplerPub], prepared) -> PrimitiveResult[SamplerPubResult]:
         rng = np.random.default_rng(self.seed)
