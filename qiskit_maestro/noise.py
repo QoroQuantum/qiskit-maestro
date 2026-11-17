@@ -47,7 +47,13 @@ import numpy as np
 
 from .exceptions import UnsupportedNoiseError
 
-__all__ = ["Channel", "NoiseTranslator", "general_channel", "is_aer_noise_model"]
+__all__ = ["HAS_CHANNELS", "Channel", "NoiseTranslator", "general_channel", "is_aer_noise_model"]
+
+# qoro-maestro 0.3.15 added maestro.QuantumChannel and QuantumCircuit.channel. With an
+# older release (0.3.14, which the cloud extra's qoro-divi pins) noise runs as it did
+# before them: the Pauli part as a pauli_channel, and the damping as an idle-noise delay
+# on the density matrix or through an ancilla on the other methods.
+HAS_CHANNELS = hasattr(maestro, "QuantumChannel")
 
 # Absolute tolerance on Pauli transfer matrix entries for a translation to count as exact.
 _TOLERANCE = 1e-9
@@ -411,6 +417,17 @@ class NoiseTranslator:
                     " It relaxes towards an excited-state population, which Maestro applies "
                     "with method='statevector', 'matrix_product_state' or 'density_matrix' on "
                     "the CPU."
+                    if HAS_CHANNELS
+                    else " It relaxes towards an excited-state population, which this "
+                    "qoro-maestro applies exactly only with method='density_matrix'; "
+                    "qoro-maestro 0.3.15 or later also samples it on the CPU statevector "
+                    "and matrix product state."
+                )
+            elif not HAS_CHANNELS:
+                hint = (
+                    " qoro-maestro 0.3.15 or later applies such errors from their channel, "
+                    "with method='statevector', 'matrix_product_state' or 'density_matrix' "
+                    "on the CPU."
                 )
             elif family == "sampled" and _general(error) is not None:
                 hint = (
@@ -588,18 +605,28 @@ def general_channel(error) -> maestro.QuantumChannel | None:
 
 def _general(error) -> maestro.QuantumChannel | None:
     """:func:`general_channel` of ``error``, built once and kept with it."""
+    if not HAS_CHANNELS:
+        return None
     cache = _translations(error)
     if "general" not in cache:
         cache["general"] = general_channel(error) if error.num_qubits <= 2 else None
     return cache["general"]
 
 
-def maestro_noise_model(readout: dict[int, tuple[float, float]]) -> maestro.NoiseModel:
+def maestro_noise_model(
+    readout: dict[int, tuple[float, float]], idle: dict[int, float] | None = None
+) -> maestro.NoiseModel:
     """The Maestro noise model a translated circuit runs under: its readout errors.
 
-    The quantum errors are operations of the circuit itself.
+    The quantum errors are operations of the circuit itself. Without
+    :data:`HAS_CHANNELS`, the density matrix applies damping as ``delay``
+    operations under idle noise: ``idle`` then maps each qubit that has them to
+    its excited-state population. Delays are in units of T1, with T2 = 2 T1, so a
+    delay of ``-ln(a)`` keeps a fraction ``a`` of the excited population.
     """
     model = maestro.NoiseModel()
+    for qubit, population in (idle or {}).items():
+        model.set_idle_noise(qubit, 1.0, 2.0, population)
     for qubit, (p10, p01) in readout.items():
         model.set_readout_error(qubit, p10, p01)
     return model

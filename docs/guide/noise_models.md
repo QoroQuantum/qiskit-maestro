@@ -46,6 +46,12 @@ thermal-relaxation (any T2 ≤ 2·T1, at any temperature) and reset errors and
 their compositions, which covers `from_backend`, and also coherent errors,
 mixtures of unitaries and general Kraus channels.
 
+Channels need `qoro-maestro` 0.3.15 or later. With 0.3.14, which the `cloud`
+extra installs, noise takes its earlier form on every method: a Pauli channel,
+with the damping applied exactly as an idle-noise delay on the density matrix
+and through an ancilla qubit elsewhere, and coherent and general Kraus errors
+are refused.
+
 Exact relaxation on Pauli propagation sends `Z` towards the identity and so
 grows the propagated operator: on wide circuits set `pp_coefficient_threshold`
 (see [Pauli propagation](pauli_propagation.md)), as for noiseless ones.

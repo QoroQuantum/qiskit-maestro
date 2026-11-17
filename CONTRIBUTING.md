@@ -93,7 +93,7 @@ cancels the run still going for the one before. The workflow runs:
   Divi doesn't import rather than skipping;
 - the same on macOS;
 - every dependency at the lowest version `pyproject.toml` allows (Qiskit 1.1,
-  Maestro 0.3.15, NumPy 1.23);
+  Maestro 0.3.14, NumPy 1.23);
 - coverage, which fails below `fail_under` in `pyproject.toml` and is
   summarised on the run's page;
 - a build of the sdist and wheel, checked by `scripts/verify_dist.py`;

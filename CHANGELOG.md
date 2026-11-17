@@ -50,8 +50,12 @@
   Pauli propagation takes them too. An error
   with a single unitary branch, such as a coherent over-rotation, is a gate: a
   circuit whose errors are all of that kind is evolved once for all its shots.
-- Requires `qoro-maestro` 0.3.15, which adds `QuantumChannel` and
-  `QuantumCircuit.channel`.
+- The channels need `qoro-maestro` 0.3.15 or later, which adds `QuantumChannel`
+  and `QuantumCircuit.channel`. The requirement stays at 0.3.14, which the
+  `cloud` extra's `qoro-divi` pins: with it, noise runs as before, a
+  `pauli_channel` and the damping as an idle-noise `delay` on the density
+  matrix or through an ancilla on the other methods, and coherent and general
+  Kraus errors raise `UnsupportedNoiseError` saying which release takes them.
 - `benchmarks/noise_vs_aer.py` times `MaestroBackend` against `AerSimulator`
   under a fake IBM device's noise model, after checking that they agree: in
   the full distribution on the density matrix, and on the sampled methods in
