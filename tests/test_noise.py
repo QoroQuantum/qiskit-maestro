@@ -283,7 +283,9 @@ def _translated(circuit, model, method, device="CPU"):
     return converted, converted.with_noise(translator, method, device)
 
 
-@pytest.mark.parametrize("method", ["statevector", "matrix_product_state", "density_matrix"])
+@pytest.mark.parametrize(
+    "method", ["statevector", "matrix_product_state", "density_matrix", "pauli_propagation"]
+)
 def test_each_error_becomes_one_shared_channel(method):
     """No error is dropped, repeated or moved, and none needs a qubit of its own."""
     circuit = _circuit(measure=True)
@@ -298,8 +300,9 @@ def test_each_error_becomes_one_shared_channel(method):
     assert noisy.ancilla is None
     assert noisy.num_qubits == circuit.num_qubits
     assert noisy.build(np.zeros(0)).num_qubits == circuit.num_qubits
-    assert noisy.noise.family == ("exact" if method == "density_matrix" else "channel")
-    assert noisy.noise.stochastic == (method != "density_matrix")
+    exact = method in ("density_matrix", "pauli_propagation")
+    assert noisy.noise.family == ("exact" if exact else "channel")
+    assert noisy.noise.stochastic == (not exact)
     # Instructions with the same Aer error share one channel object: the model has one
     # error for both h gates and one for the three measurements, and eight others here.
     channels = [op.channel for op in noisy.ops if op.kind == "channel"]
@@ -327,7 +330,7 @@ def test_each_error_becomes_one_shared_channel(method):
     [
         ("tensor_network", "CPU"),
         ("extended_stabilizer", "CPU"),
-        ("pauli_propagation", "CPU"),
+        ("pauli_propagation", "GPU"),
         ("statevector", "GPU"),
         ("matrix_product_state", "GPU"),
     ],
@@ -339,6 +342,40 @@ def test_methods_that_hold_no_channels_use_an_ancilla(method, device):
     assert "channel" not in kinds and "pauli_channel" in kinds
     assert noisy.ancilla == circuit.num_qubits
     assert noisy.noise.family == "sampled" and noisy.noise.stochastic
+
+
+def test_pauli_propagation_applies_relaxation_exactly_once():
+    """The CPU propagator applies each channel's adjoint to the observable: one exact run.
+
+    Before, it took the Pauli channel and the ancilla's damping of the sampled methods,
+    which it also applies exactly, and evaluated that same result once per trajectory.
+    """
+    from qiskit_aer.primitives import EstimatorV2 as AerEstimator
+
+    device = GenericBackendV2(3, seed=5)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = NoiseModel.from_backend(device, temperature=120)
+    circuit = QuantumCircuit(3)
+    circuit.x(0)
+    circuit.sx(1)
+    circuit.cx(0, 1)
+    circuit.delay(40, 0, unit="us")
+    circuit.delay(300, 2, unit="us")
+    circuit.cx(1, 2)
+    observables = [SparsePauliOp(label) for label in ("IIZ", "IZI", "ZII", "IZZ", "ZZI", "XXY")]
+    aer = AerEstimator(
+        options={
+            "backend_options": {"method": "density_matrix", "noise_model": model},
+            "default_precision": 0,
+        }
+    )
+    expected = aer.run([(circuit, observables)]).result()[0].data.evs
+    _, noisy = _translated(circuit, model, "pauli_propagation")
+    assert noisy.ancilla is None and noisy.noise.family == "exact" and not noisy.noise.stochastic
+    estimator = MaestroEstimator(method="pauli_propagation", noise_model=model)
+    values = estimator.run([(circuit, observables)]).result()[0].data.evs
+    np.testing.assert_allclose(values, expected, atol=1e-9)
 
 
 def test_an_error_that_does_nothing_adds_no_operation():

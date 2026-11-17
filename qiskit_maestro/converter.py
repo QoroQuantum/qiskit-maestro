@@ -49,6 +49,7 @@ from .noise import maestro_noise_model
 
 __all__ = [
     "CHANNEL_METHODS",
+    "EXACT_CHANNEL_METHODS",
     "NATIVE_GATES",
     "SAVE_INSTRUCTIONS",
     "ConvertedCircuit",
@@ -60,6 +61,11 @@ __all__ = [
 # their state, one branch per shot. The density matrix holds them too, and applies them
 # exactly.
 CHANNEL_METHODS = frozenset({"statevector", "matrix_product_state"})
+
+# The CPU methods that apply a channel exactly, so a noisy circuit runs once: the density
+# matrix, and Pauli propagation, which applies the channel's adjoint to the observable.
+# (The density matrix applies channels on every device.)
+EXACT_CHANNEL_METHODS = frozenset({"density_matrix", "pauli_propagation"})
 
 # Qiskit gate class -> the maestro.circuits.QuantumCircuit method that applies it.
 # Every pair was checked against Qiskit's matrix, global phase included. The
@@ -349,9 +355,10 @@ class ConvertedCircuit:
     def with_noise(self, translator, method: str, device: str = "CPU") -> ConvertedCircuit:
         """Translate the circuit's Aer errors for ``method`` and attach the readout errors.
 
-        Each error becomes one channel operation on the density matrix, which
-        applies it exactly, and on the CPU statevector and matrix product state,
-        which sample it from their state on the circuit's own qubits. The other
+        Each error becomes one channel operation on the density matrix and on
+        CPU Pauli propagation, which apply it exactly, and on the CPU statevector
+        and matrix product state, which sample it from their state on the
+        circuit's own qubits. The other
         methods, and the GPU, hold no channels: there the Pauli part is a
         ``pauli_channel`` and the damping an exact rotation into an ancilla, and
         an error with no such parts is rejected.
@@ -365,7 +372,7 @@ class ConvertedCircuit:
         """
         if translator is None:
             return self
-        if method == "density_matrix":
+        if method == "density_matrix" or (method in EXACT_CHANNEL_METHODS and device == "CPU"):
             family = "exact"
         elif method in CHANNEL_METHODS and device == "CPU":
             family = "channel"

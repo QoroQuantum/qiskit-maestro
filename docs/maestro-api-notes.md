@@ -183,7 +183,9 @@ today; none of these are hidden from users.
     applies a channel exactly, and the CPU statevector and matrix product
     state sample it from their state on every execution, so the plugin emits
     one shared channel per Aer error there: no `delay` under `set_idle_noise`,
-    no ancilla, and coherent and general Kraus errors run. The other methods
+    no ancilla, and coherent and general Kraus errors run. The CPU Pauli
+    propagator applies channels exactly too, to the observable, so it takes
+    the same channels as the density matrix and one run. The other methods
     and the GPU hold no channels, so there the plugin still emits a
     `pauli_channel` and runs the damping on an ancilla (`cry`, `cx`, `reset`),
     and errors with no such form raise. Still open: `noiseless=` on every gate

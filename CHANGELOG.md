@@ -29,6 +29,12 @@
   product state sample it from their own state on every shot, as Aer does:
   noisy circuits no longer carry an ancilla qubit, and relaxation towards a
   thermal population (`from_backend(..., temperature=...)`) is sampled too.
+  Pauli propagation on the CPU applies the same channels exactly, to the
+  observable, so a noisy estimate is one run: before, it took the Pauli
+  channel and ancilla damping, which it also applies exactly, and repeated
+  that same evaluation for each of 1,024 trajectories. With a fake device's
+  full noise model it gives the same values 40 to over 900 times as fast, and
+  with `pp_coefficient_threshold=1e-4` noisy 27-qubit QAOA takes 0.2 s.
   The other methods and the GPU keep the Pauli channel and the ancilla.
   With a fake IBM device's full noise model (`benchmarks/noise_vs_aer.py`, Aer
   0.18.2, a 24-core desktop): the 12-qubit density matrix takes 2.1 s at 1,000
@@ -37,10 +43,11 @@
   bond limit of 64 is 5 to 15 times as fast at 6 to 16 qubits, and takes two
   minutes at 20 qubits, where Aer was stopped after fifteen.
 - Coherent errors, mixtures of unitaries and general Kraus channels on one or
-  two qubits run on `density_matrix`, `statevector` and `matrix_product_state`
-  (CPU), from Aer's description of the error: as a mixture of unitaries where
+  two qubits run on `density_matrix`, `statevector`, `matrix_product_state`
+  and `pauli_propagation` (CPU), from Aer's description of the error: as a mixture of unitaries where
   its circuits are unitary, and by its Kraus operators otherwise. They raised
-  `UnsupportedNoiseError` before, and still do on the other methods. An error
+  `UnsupportedNoiseError` before, and still do on the other methods. CPU
+  Pauli propagation takes them too. An error
   with a single unitary branch, such as a coherent over-rotation, is a gate: a
   circuit whose errors are all of that kind is evolved once for all its shots.
 - Requires `qoro-maestro` 0.3.15, which adds `QuantumChannel` and

@@ -36,13 +36,19 @@ small noisy circuits, as Aer does.
 ## Supported errors
 
 Each Aer error becomes one Maestro channel. The density matrix applies it
-exactly. The statevector and the matrix product state sample it from their own
-state on every shot, as Aer does, so a noisy circuit runs on its own qubits,
-with no ancilla. These three methods take every error on one or two qubits:
+exactly, and so does Pauli propagation on the CPU, which applies the channel's
+adjoint to the observable: a noisy estimate is one exact run. The statevector
+and the matrix product state sample it from their own state on every shot, as
+Aer does, so a noisy circuit runs on its own qubits, with no ancilla. These
+four methods take every error on one or two qubits:
 depolarizing, Pauli, bit- and phase-flip, phase-damping, amplitude-damping,
 thermal-relaxation (any T2 ≤ 2·T1, at any temperature) and reset errors and
 their compositions, which covers `from_backend`, and also coherent errors,
 mixtures of unitaries and general Kraus channels.
+
+Exact relaxation on Pauli propagation sends `Z` towards the identity and so
+grows the propagated operator: on wide circuits set `pp_coefficient_threshold`
+(see [Pauli propagation](pauli_propagation.md)), as for noiseless ones.
 
 The other methods, and the GPU, sample the Pauli part of an error and apply its
 damping through an ancilla qubit, so they take the errors that are a Pauli
