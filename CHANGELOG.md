@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.3.0]
 
 - Documentation at
   [qoroquantum.github.io/qiskit-maestro](https://qoroquantum.github.io/qiskit-maestro/),
